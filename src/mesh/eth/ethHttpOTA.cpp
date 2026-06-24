@@ -6,11 +6,12 @@
 // would have to be invoked directly.
 #if HAS_ETHERNET && defined(HAS_ETHERNET_OTA) && defined(HAS_ETHERNET_API)
 
+#include "NodeDB.h"
 #include "ethApiHandlers.h"
 #include "ethHttpOTA.h"
 #include "ethStreamAdapter.h"
+#include "memGet.h"
 #include "otaShared.h"
-#include "NodeDB.h"
 #include <Arduino.h>
 #include <ErriezCRC32.h>
 #include <Updater.h>
@@ -125,20 +126,34 @@ static void jsonEscapeInfo(char *dst, size_t dstsize, const char *src)
 static const char *roleName(meshtastic_Config_DeviceConfig_Role role)
 {
     switch (role) {
-    case meshtastic_Config_DeviceConfig_Role_CLIENT: return "CLIENT";
-    case meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE: return "CLIENT_MUTE";
-    case meshtastic_Config_DeviceConfig_Role_ROUTER: return "ROUTER";
-    case meshtastic_Config_DeviceConfig_Role_ROUTER_CLIENT: return "ROUTER_CLIENT";
-    case meshtastic_Config_DeviceConfig_Role_REPEATER: return "REPEATER";
-    case meshtastic_Config_DeviceConfig_Role_TRACKER: return "TRACKER";
-    case meshtastic_Config_DeviceConfig_Role_SENSOR: return "SENSOR";
-    case meshtastic_Config_DeviceConfig_Role_TAK: return "TAK";
-    case meshtastic_Config_DeviceConfig_Role_CLIENT_HIDDEN: return "CLIENT_HIDDEN";
-    case meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND: return "LOST_AND_FOUND";
-    case meshtastic_Config_DeviceConfig_Role_TAK_TRACKER: return "TAK_TRACKER";
-    case meshtastic_Config_DeviceConfig_Role_ROUTER_LATE: return "ROUTER_LATE";
-    case meshtastic_Config_DeviceConfig_Role_CLIENT_BASE: return "CLIENT_BASE";
-    default: return "UNKNOWN";
+    case meshtastic_Config_DeviceConfig_Role_CLIENT:
+        return "CLIENT";
+    case meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE:
+        return "CLIENT_MUTE";
+    case meshtastic_Config_DeviceConfig_Role_ROUTER:
+        return "ROUTER";
+    case meshtastic_Config_DeviceConfig_Role_ROUTER_CLIENT:
+        return "ROUTER_CLIENT";
+    case meshtastic_Config_DeviceConfig_Role_REPEATER:
+        return "REPEATER";
+    case meshtastic_Config_DeviceConfig_Role_TRACKER:
+        return "TRACKER";
+    case meshtastic_Config_DeviceConfig_Role_SENSOR:
+        return "SENSOR";
+    case meshtastic_Config_DeviceConfig_Role_TAK:
+        return "TAK";
+    case meshtastic_Config_DeviceConfig_Role_CLIENT_HIDDEN:
+        return "CLIENT_HIDDEN";
+    case meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND:
+        return "LOST_AND_FOUND";
+    case meshtastic_Config_DeviceConfig_Role_TAK_TRACKER:
+        return "TAK_TRACKER";
+    case meshtastic_Config_DeviceConfig_Role_ROUTER_LATE:
+        return "ROUTER_LATE";
+    case meshtastic_Config_DeviceConfig_Role_CLIENT_BASE:
+        return "CLIENT_BASE";
+    default:
+        return "UNKNOWN";
     }
 }
 
@@ -151,13 +166,16 @@ void handleOtaInfo(IStreamReadWrite &client)
     jsonEscapeInfo(longName, sizeof(longName), owner.long_name);
     jsonEscapeInfo(shortName, sizeof(shortName), owner.short_name);
 
-    char body[384];
+    // heap_free / heap_total let a poller track the free-heap slope over time
+    // (leak-hunting) via plain HTTP — the W5500's reliable path — without the
+    // LocalStats telemetry subscription, which this board's TCP API can't sustain.
+    char body[448];
     int n = snprintf(body, sizeof(body),
                      "{\"pio_env\":\"%s\",\"firmware_version\":\"%s\",\"hw_model\":%d,"
                      "\"owner_long_name\":\"%s\",\"owner_short_name\":\"%s\",\"role\":\"%s\","
-                     "\"uptime_s\":%lu}",
-                     optstr(APP_ENV), optstr(APP_VERSION), (int)HW_VENDOR, longName, shortName,
-                     roleName(config.device.role), (unsigned long)(millis() / 1000));
+                     "\"uptime_s\":%lu,\"heap_free\":%lu,\"heap_total\":%lu}",
+                     optstr(APP_ENV), optstr(APP_VERSION), (int)HW_VENDOR, longName, shortName, roleName(config.device.role),
+                     (unsigned long)(millis() / 1000), (unsigned long)memGet.getFreeHeap(), (unsigned long)memGet.getHeapSize());
     if (n < 0)
         n = 0;
     else if (n >= (int)sizeof(body))
@@ -306,15 +324,14 @@ void handleOtaUpload(IStreamReadWrite &client, const Request &req)
         FEED_WATCHDOG();
 
         if (totalReceived % (declaredSize / 10 + 1) < (size_t)got) {
-            LOG_INFO("ETH HTTP OTA: %u%% (%u/%u)", (unsigned)(100ULL * totalReceived / declaredSize),
-                     (unsigned)totalReceived, (unsigned)declaredSize);
+            LOG_INFO("ETH HTTP OTA: %u%% (%u/%u)", (unsigned)(100ULL * totalReceived / declaredSize), (unsigned)totalReceived,
+                     (unsigned)declaredSize);
         }
     }
 
     uint32_t computedCRC = crc32Final(crc);
     if (computedCRC != declaredCrc) {
-        LOG_ERROR("ETH HTTP OTA: CRC mismatch (expected=0x%08X, computed=0x%08X)", (unsigned)declaredCrc,
-                  (unsigned)computedCRC);
+        LOG_ERROR("ETH HTTP OTA: CRC mismatch (expected=0x%08X, computed=0x%08X)", (unsigned)declaredCrc, (unsigned)computedCRC);
         Update.end(false);
         sendJSONError(client, 400, "Bad Request", "crc");
         return;

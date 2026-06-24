@@ -26,7 +26,7 @@
 // GP24: VBUS sense – HIGH when USB is present (digital read)
 // GP29: ADC3 measures VSYS/3 (200 kΩ / 100 kΩ divider, same as standard Pico 2)
 #define EXT_PWR_DETECT 24
-#define BATTERY_PIN    29
+#define BATTERY_PIN 29
 #define ADC_MULTIPLIER 3.0
 #define BATTERY_SENSE_RESOLUTION_BITS 12
 // No real battery — suppress false "battery at 100%" while USB powers VSYS
@@ -55,21 +55,21 @@
 #undef LORA_MOSI
 #undef LORA_CS
 
-#define LORA_SCK  10
+#define LORA_SCK 10
 #define LORA_MOSI 11
 #define LORA_MISO 12
-#define LORA_CS   13
+#define LORA_CS 13
 
-#define LORA_DIO0  RADIOLIB_NC
+#define LORA_DIO0 RADIOLIB_NC
 #define LORA_RESET 15
-#define LORA_DIO1  14   // IRQ
-#define LORA_DIO2  2    // BUSY
-#define LORA_DIO3  RADIOLIB_NC
+#define LORA_DIO1 14 // IRQ
+#define LORA_DIO2 2  // BUSY
+#define LORA_DIO3 RADIOLIB_NC
 
 #ifdef USE_SX1262
-#define SX126X_CS    LORA_CS
-#define SX126X_DIO1  LORA_DIO1
-#define SX126X_BUSY  LORA_DIO2
+#define SX126X_CS LORA_CS
+#define SX126X_DIO1 LORA_DIO1
+#define SX126X_BUSY LORA_DIO2
 #define SX126X_RESET LORA_RESET
 // GP3 = RXEN: driven HIGH at init and held there (LNA always enabled).
 // SX1262 drives DIO2 HIGH during TX → TXEN via bridge on E22 module.
@@ -86,12 +86,12 @@
 //   GP21 = CS         (was GP17) — plain GPIO, any pin works
 //   GP6  = W5500 /RST (was GP20) — plain GPIO
 #define HAS_ETHERNET 1
-#define WIZNET_5500_EVB_PICO2 1   // reuses EVB driver code paths
+#define WIZNET_5500_EVB_PICO2 1 // reuses EVB driver code paths
 
 #define ETH_SPI0_MISO 20
-#define ETH_SPI0_SCK  22
+#define ETH_SPI0_SCK 22
 #define ETH_SPI0_MOSI 7
 
 #define PIN_ETHERNET_RESET 6
-#define PIN_ETHERNET_SS    21
-#define ETH_SPI_PORT       SPI
+#define PIN_ETHERNET_SS 21
+#define ETH_SPI_PORT SPI
