@@ -242,7 +242,11 @@ bool initEthernet()
         pinMode(PIN_ETHERNET_RESET, OUTPUT);
         digitalWrite(PIN_ETHERNET_RESET, LOW); // Reset Time.
         delay(100);
-        digitalWrite(PIN_ETHERNET_RESET, HIGH); // Reset Time.
+        digitalWrite(PIN_ETHERNET_RESET, HIGH); // Release reset.
+        // W5500 needs ~50ms after reset deassert for the internal PLL to lock
+        // before SPI register access is reliable; probing too early returns
+        // EthernetNoHardware on slower chips/boards.
+        delay(50);
 #endif
 
 #ifdef USE_ARDUINO_ETHERNET // Configure SPI0 for the W5500 module
@@ -272,11 +276,26 @@ bool initEthernet()
 
         if (config.network.address_mode == meshtastic_Config_NetworkConfig_AddressMode_DHCP) {
             LOG_INFO("Start Ethernet DHCP");
+            // Ethernet.begin() detects the W5500 (via W5100.init()) and returns 0
+            // immediately if the chip is not found — without attempting DHCP. A
+            // cold-boot probe can occasionally miss a still-settling chip, so on
+            // EthernetNoHardware re-pulse reset and retry before giving up.
+            for (int tries = 0; tries < 3; tries++) {
 #ifdef ETH_DHCP_TIMEOUT_MS
-            status = Ethernet.begin(mac, ETH_DHCP_TIMEOUT_MS);
+                status = Ethernet.begin(mac, ETH_DHCP_TIMEOUT_MS);
 #else
-            status = Ethernet.begin(mac);
+                status = Ethernet.begin(mac);
 #endif
+                if (status != 0 || Ethernet.hardwareStatus() != EthernetNoHardware)
+                    break; // got an IP, or the chip is present (a link/DHCP issue retrying won't fix)
+                LOG_WARN("W5500 not detected, re-pulsing reset and retrying (%d)", tries + 1);
+#ifdef PIN_ETHERNET_RESET
+                digitalWrite(PIN_ETHERNET_RESET, LOW);
+                delay(20);
+                digitalWrite(PIN_ETHERNET_RESET, HIGH);
+                delay(50);
+#endif
+            }
         } else if (config.network.address_mode == meshtastic_Config_NetworkConfig_AddressMode_STATIC) {
             LOG_INFO("Start Ethernet Static");
             Ethernet.begin(mac, config.network.ipv4_config.ip, config.network.ipv4_config.dns, config.network.ipv4_config.gateway,
