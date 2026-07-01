@@ -108,6 +108,11 @@ static int32_t reconnectETH()
             ETH_SPI_PORT.setTX(PIN_SPI0_MOSI);
             ETH_SPI_PORT.setRX(PIN_SPI0_MISO);
             ETH_SPI_PORT.begin();
+#elif defined(USE_W5100S) && defined(ARCH_RP2040) // W5100S on SPI0 (e.g. pico2_w5100s_e22)
+            ETH_SPI_PORT.setRX(ETH_SPI0_MISO);
+            ETH_SPI_PORT.setSCK(ETH_SPI0_SCK);
+            ETH_SPI_PORT.setTX(ETH_SPI0_MOSI);
+            ETH_SPI_PORT.begin();
 #endif
             Ethernet.init(ETH_SPI_PORT, PIN_ETHERNET_SS);
 #endif
@@ -256,10 +261,15 @@ bool initEthernet()
         SPI.begin();
         Ethernet.init(PIN_ETHERNET_SS);
 #else
-#ifdef RAK11310 // Initialize the SPI port
+#ifdef RAK11310                                   // Initialize the SPI port
         ETH_SPI_PORT.setSCK(PIN_SPI0_SCK);
         ETH_SPI_PORT.setTX(PIN_SPI0_MOSI);
         ETH_SPI_PORT.setRX(PIN_SPI0_MISO);
+        ETH_SPI_PORT.begin();
+#elif defined(USE_W5100S) && defined(ARCH_RP2040) // W5100S on SPI0 (e.g. pico2_w5100s_e22)
+        ETH_SPI_PORT.setRX(ETH_SPI0_MISO);
+        ETH_SPI_PORT.setSCK(ETH_SPI0_SCK);
+        ETH_SPI_PORT.setTX(ETH_SPI0_MOSI);
         ETH_SPI_PORT.begin();
 #endif
         Ethernet.init(ETH_SPI_PORT, PIN_ETHERNET_SS);
