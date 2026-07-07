@@ -89,67 +89,73 @@ static int32_t reconnectETH()
         if (chipWasReset || neverGotAddress) {
             if (chipWasReset) {
                 LOG_WARN("W5100S MAC mismatch (chip reset detected), reinitializing Ethernet");
-            } else {
-                LOG_WARN("Ethernet never acquired an address at boot, retrying");
-            }
 
-            syslog.disable();
+                syslog.disable();
 #if !MESHTASTIC_EXCLUDE_SOCKETAPI
-            deInitApiServer();
+                deInitApiServer();
 #endif
 #if HAS_ETHERNET && defined(HAS_ETHERNET_API)
-            // Drop the HTTP/80 listener; the restart path below rebinds it. Without
-            // this the singleton guard makes initEthApiServer() a no-op and the
-            // phone API stays dead on a stale socket until reboot.
-            deInitEthApiServer();
+                // Drop the HTTP/80 listener; the restart path below rebinds it. Without
+                // this the singleton guard makes initEthApiServer() a no-op and the
+                // phone API stays dead on a stale socket until reboot.
+                deInitEthApiServer();
 #endif
 #if HAS_ETHERNET && defined(HAS_ETHERNET_TLS_API) && defined(ARCH_RP2040)
-            // Same for HTTPS/443 + its mbedTLS context.
-            deInitEthTlsApiServer();
+                // Same for HTTPS/443 + its mbedTLS context.
+                deInitEthTlsApiServer();
 #endif
 #if HAS_UDP_MULTICAST
-            if (udpHandler) {
-                udpHandler->stop();
-            }
+                if (udpHandler) {
+                    udpHandler->stop();
+                }
 #endif
 
-            ethStartupComplete = false;
+                ethStartupComplete = false;
 #ifndef DISABLE_NTP
-            ntp_renew = 0;
+                ntp_renew = 0;
 #endif
 
+                // Only pulse the physical reset / redo SPI+driver init when the chip
+                // itself was reset (brownout). Doing this for neverGotAddress too was
+                // the actual regression: it bounces the PHY link on every 5s retry,
+                // so a switch with a port-forwarding delay (STP without portfast)
+                // never sees a stable link long enough to start forwarding - the
+                // retry loop kept re-arming the exact delay it was waiting out.
 #ifdef PIN_ETHERNET_RESET
-            pinMode(PIN_ETHERNET_RESET, OUTPUT);
-            digitalWrite(PIN_ETHERNET_RESET, LOW);
-            delay(100);
-            digitalWrite(PIN_ETHERNET_RESET, HIGH);
-            delay(100);
+                pinMode(PIN_ETHERNET_RESET, OUTPUT);
+                digitalWrite(PIN_ETHERNET_RESET, LOW);
+                delay(100);
+                digitalWrite(PIN_ETHERNET_RESET, HIGH);
+                delay(100);
 #endif
 
 #ifdef USE_ARDUINO_ETHERNET // Re-configure SPI0 for the W5500 module
-            SPI.setRX(ETH_SPI0_MISO);
-            SPI.setSCK(ETH_SPI0_SCK);
-            SPI.setTX(ETH_SPI0_MOSI);
-            SPI.begin();
-            Ethernet.init(PIN_ETHERNET_SS);
+                SPI.setRX(ETH_SPI0_MISO);
+                SPI.setSCK(ETH_SPI0_SCK);
+                SPI.setTX(ETH_SPI0_MOSI);
+                SPI.begin();
+                Ethernet.init(PIN_ETHERNET_SS);
 #else
 #ifdef RAK11310
-            ETH_SPI_PORT.setSCK(PIN_SPI0_SCK);
-            ETH_SPI_PORT.setTX(PIN_SPI0_MOSI);
-            ETH_SPI_PORT.setRX(PIN_SPI0_MISO);
-            ETH_SPI_PORT.begin();
+                ETH_SPI_PORT.setSCK(PIN_SPI0_SCK);
+                ETH_SPI_PORT.setTX(PIN_SPI0_MOSI);
+                ETH_SPI_PORT.setRX(PIN_SPI0_MISO);
+                ETH_SPI_PORT.begin();
 #elif defined(USE_W5100S) && defined(ARCH_RP2040) // W5100S on SPI0 (e.g. pico2_w5100s_e22)
-            ETH_SPI_PORT.setRX(ETH_SPI0_MISO);
-            ETH_SPI_PORT.setSCK(ETH_SPI0_SCK);
-            ETH_SPI_PORT.setTX(ETH_SPI0_MOSI);
-            ETH_SPI_PORT.begin();
+                ETH_SPI_PORT.setRX(ETH_SPI0_MISO);
+                ETH_SPI_PORT.setSCK(ETH_SPI0_SCK);
+                ETH_SPI_PORT.setTX(ETH_SPI0_MOSI);
+                ETH_SPI_PORT.begin();
 #endif
-            Ethernet.init(ETH_SPI_PORT, PIN_ETHERNET_SS);
+                Ethernet.init(ETH_SPI_PORT, PIN_ETHERNET_SS);
 #endif
+            } else {
+                LOG_WARN("Ethernet never acquired an address at boot, retrying DHCP (link already up, no reset pulse)");
+            }
 
             // Feed right before the blocking call: worst case this is ~4s (DHCP) +
-            // ~200ms (reset pulse above) after the last watchdog_update(), leaving
-            // margin under the 8s timeout even with scheduling jitter.
+            // (chipWasReset only) ~200ms reset pulse, leaving margin under the 8s
+            // watchdog window even with scheduling jitter.
             FEED_WATCHDOG();
 
             int status = 0;
