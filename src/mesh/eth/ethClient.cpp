@@ -22,6 +22,7 @@
 #else
 #include <RAK13800_W5100S.h>
 #endif
+
 // Shorter DHCP timeout so LoRa startup isn't blocked when no DHCP server is present.
 // Must apply to BOTH drivers: RAK13800_W5100S::begin() defaults to a 60s timeout
 // (arduino-libraries/Ethernet does too), and a boot-time block that long is fatal.
@@ -37,6 +38,30 @@
 #define FEED_WATCHDOG() watchdog_update()
 #else
 #define FEED_WATCHDOG() ((void)0)
+#endif
+
+// Socket-exhaustion diagnostic, off unless -D ETH_SOCKET_DIAG.
+//
+// The W5100S has 4 hardware sockets; the W5500 has 8. Both drivers pick
+// MAX_SOCK_NUM from the HOST's RAM size, not from the Ethernet chip, so on a
+// RP2350 (520 KB) the W5100S build compiles with MAX_SOCK_NUM = 8 and can hand
+// out socket indices the chip does not have. This dumps the real per-socket
+// mode/status registers so we can see which indices are live and which are
+// phantom, instead of guessing.
+#if defined(ETH_SOCKET_DIAG) && !defined(USE_ARDUINO_ETHERNET)
+#include <w5100.h>
+static void logSocketDiag(const char *when)
+{
+    LOG_INFO("[SOCKDIAG] %s: MAX_SOCK_NUM=%d", when, (int)MAX_SOCK_NUM);
+    for (uint8_t s = 0; s < MAX_SOCK_NUM; s++) {
+        // SnSR 0x00=CLOSED 0x13=INIT 0x14=LISTEN 0x17=ESTABLISHED 0x22=UDP
+        LOG_INFO("[SOCKDIAG]   sock%u SnMR=0x%02x SnSR=0x%02x", s, W5100.readSnMR(s), W5100.readSnSR(s));
+        FEED_WATCHDOG(); // serial logging is slow enough to matter here
+    }
+}
+#define SOCK_DIAG(when) logSocketDiag(when)
+#else
+#define SOCK_DIAG(when) ((void)0)
 #endif
 
 // reconnectETH() below runs from the main loop's Periodic scheduler, i.e. after
@@ -255,14 +280,17 @@ static int32_t reconnectETH()
 #endif
 
             ethStartupComplete = true;
+            SOCK_DIAG("after services started");
         }
     }
 
 #ifndef DISABLE_NTP
     if (isEthernetAvailable() && (ntp_renew < millis())) {
 
+        SOCK_DIAG("before NTP update");
         LOG_INFO("Update NTP time from %s", config.network.ntp_server);
         if (timeClient.update()) {
+            SOCK_DIAG("after NTP update");
             LOG_DEBUG("NTP Request Success - Set RTCQualityNTP if needed");
 
             struct timeval tv;
