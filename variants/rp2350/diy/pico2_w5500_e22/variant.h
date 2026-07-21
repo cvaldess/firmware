@@ -77,9 +77,9 @@
 // ---- W5500 Ethernet on SPI0 --------------------------------------------
 #define HAS_ETHERNET 1
 // Use the arduino-libraries/Ethernet stack (W5500) instead of RAK13800_W5100S.
-// A W5100S build (USE_W5100S — e.g. the pico2_w5100s_e22 env, for a
-// W5100S-EVB-Pico2 populated on this carrier in place of a W5500) suppresses
-// this so the RAK13800_W5100S driver is used instead (same Ethernet API).
+// A W5100S build (USE_W5100S — e.g. the wiznet_5100s_evb_pico2_e22p env, for a
+// W5100S-EVB-Pico2 in place of a W5500) suppresses this so the RAK13800_W5100S
+// driver is used instead (same Ethernet API, same GP16-20 pin mapping).
 #ifndef USE_W5100S
 #define USE_ARDUINO_ETHERNET 1
 #endif
