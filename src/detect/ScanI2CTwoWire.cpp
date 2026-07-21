@@ -929,23 +929,15 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
                 // drains the Wire RX buffer, and requestFrom() is what fills it, so
                 // without it the read returns 0 bytes after burning Stream's 1s timeout
                 // and every SE050 falls through to the FT6336U branch below.
-                //
-                // The SE050 also NACKs while it is still starting up or preparing the
-                // answer, so retry a few times with a short guard delay rather than
-                // deciding on a single attempt.
                 const uint8_t getInfo[] = {0x5A, 0xC0, 0x00, 0xFF, 0xFC};
                 const uint8_t expectedInfo[] = {0xA5, 0xE0, 0x00, 0x3F, 0x19};
                 uint8_t info[sizeof(expectedInfo)] = {0};
                 size_t lastLen = 0;
                 bool isSE050 = false;
 
-                for (uint8_t attempt = 0; attempt < 3 && !isSE050; attempt++) {
-                    i2cBus->beginTransmission(addr.address);
-                    i2cBus->write(getInfo, sizeof(getInfo));
-                    if (i2cBus->endTransmission() != 0) {
-                        delay(5); // chip not ready to accept the frame yet
-                        continue;
-                    }
+                i2cBus->beginTransmission(addr.address);
+                i2cBus->write(getInfo, sizeof(getInfo));
+                if (i2cBus->endTransmission() == 0) {
                     delay(2); // guard time before the answer can be read back
                     lastLen = i2cBus->requestFrom((uint8_t)addr.address, (uint8_t)sizeof(info));
                     if (lastLen == sizeof(info)) {
@@ -953,8 +945,6 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
                             info[i] = i2cBus->read();
                         isSE050 = (memcmp(expectedInfo, info, sizeof(info)) == 0);
                     }
-                    if (!isSE050)
-                        delay(5);
                 }
 
                 // Distinguishes "nothing came back" from "something answered, but not an
