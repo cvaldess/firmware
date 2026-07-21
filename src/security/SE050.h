@@ -32,7 +32,18 @@ class SE050
     // success. Safe to call repeatedly.
     bool reset(uint8_t *atrOut = nullptr, size_t atrCap = 0, size_t *atrLen = nullptr);
 
-    // Layer-1 bring-up check: reset, then report the ATR. Logs what it finds.
+    // Reset, then SELECT the IoT applet. Every APDU exchange needs the applet
+    // selected first. Returns true on SW=9000.
+    bool open();
+
+    // Sends one APDU wrapped in an I-block and returns the R-APDU (response INF,
+    // trailing SW included). Handles WTX. Returns the R-APDU length, or -1.
+    int transceive(const uint8_t *apdu, size_t apduLen, uint8_t *resp, size_t respCap);
+
+    // Trailing status word of an R-APDU.
+    static uint16_t statusWord(const uint8_t *resp, int len);
+
+    // Layer-1/2 bring-up check: open, read the applet version, pull random bytes.
     bool probe();
 
   private:
@@ -40,11 +51,13 @@ class SE050
     // (3 + LEN + 2), or 0 if nothing valid came back.
     size_t xfer(const uint8_t *tx, size_t txLen, uint8_t *rx, size_t rxCap);
 
+    bool selectApplet();
+
     static uint16_t crc(const uint8_t *data, size_t len);
 
     TwoWire &bus;
     uint8_t address;
-    uint8_t seq = 0; // host N(S), reset by the interface reset
+    uint8_t seq = 0; // host N(S), toggled per I-block, reset by the interface reset
 };
 
 #endif // HAS_SE050
