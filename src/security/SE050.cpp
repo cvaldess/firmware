@@ -4,6 +4,7 @@
 
 #include "configuration.h"
 #include <AES.h>
+#include <Curve25519.h>
 #include <Arduino.h>
 #include <string.h>
 
@@ -398,6 +399,361 @@ bool SE050::openSecureChannel()
     return true;
 }
 
+// --- Secure channel wrapping ---------------------------------------------
+
+void SE050::cbc(const uint8_t key[16], const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out, bool encrypt)
+{
+    AES128 aes;
+    aes.setKey(key, 16);
+    uint8_t chain[16];
+    memcpy(chain, iv, 16);
+    for (size_t off = 0; off < len; off += 16) {
+        if (encrypt) {
+            uint8_t block[16];
+            for (int i = 0; i < 16; i++)
+                block[i] = in[off + i] ^ chain[i];
+            aes.encryptBlock(&out[off], block);
+            memcpy(chain, &out[off], 16);
+        } else {
+            uint8_t cipher[16];
+            memcpy(cipher, &in[off], 16);
+            aes.decryptBlock(&out[off], cipher);
+            for (int i = 0; i < 16; i++)
+                out[off + i] ^= chain[i];
+            memcpy(chain, cipher, 16);
+        }
+    }
+}
+
+// The encryption IV is AES-ECB(S-ENC, counter block). The counter goes in the low
+// bytes big-endian; for a response the top byte of the block is 0x80.
+void SE050::encryptionIcv(bool response, uint8_t icv[16])
+{
+    uint8_t blk[16] = {0};
+    blk[12] = (uint8_t)(scp.counter >> 24);
+    blk[13] = (uint8_t)(scp.counter >> 16);
+    blk[14] = (uint8_t)(scp.counter >> 8);
+    blk[15] = (uint8_t)(scp.counter);
+    if (response)
+        blk[0] = 0x80;
+    AES128 aes;
+    aes.setKey(scp.senc, 16);
+    aes.encryptBlock(icv, blk);
+}
+
+int SE050::secureApdu(const uint8_t header[4], const uint8_t *data, int dataLen, bool expectResponse, uint8_t *resp,
+                      int respCap, uint16_t *sw)
+{
+    if (!scp.open) {
+        *sw = 0xFFFF;
+        return -1;
+    }
+
+    scp.counter++;
+
+    uint8_t enc[256];
+    int encLen = 0;
+    if (dataLen > 0) {
+        uint8_t padded[256];
+        if ((size_t)dataLen + 16 > sizeof(padded)) {
+            *sw = 0xFFFF;
+            return -1;
+        }
+        memcpy(padded, data, dataLen);
+        padded[dataLen] = 0x80; // SCP03 pads with 80 00 .. to the block size
+        encLen = ((dataLen + 1 + 15) / 16) * 16;
+        memset(&padded[dataLen + 1], 0, encLen - (dataLen + 1));
+        uint8_t icv[16];
+        encryptionIcv(false, icv);
+        cbc(scp.senc, icv, padded, encLen, enc, true);
+    }
+
+    uint8_t out[300];
+    int p = 0;
+    out[p++] = (uint8_t)(header[0] | 0x04); // CLA carries the security bit
+    out[p++] = header[1];
+    out[p++] = header[2];
+    out[p++] = header[3];
+    out[p++] = (uint8_t)(encLen + 8); // Lc counts the C-MAC too
+    memcpy(&out[p], enc, encLen);
+    p += encLen;
+
+    uint8_t mac[8];
+    chainedCmac(out, p, mac);
+    memcpy(&out[p], mac, 8);
+    p += 8;
+    if (expectResponse)
+        out[p++] = 0x00;
+
+    uint8_t r[300];
+    int n = transceive(out, p, r, sizeof(r));
+    if (n < 0) {
+        *sw = 0xFFFF;
+        return -1;
+    }
+
+    // Response is [encrypted data][R-MAC 8][SW 2]. A short frame means an error
+    // was returned without a MAC.
+    if (n < 10) {
+        *sw = statusWord(r, n);
+        return n >= 2 ? 0 : -1;
+    }
+    *sw = (uint16_t)((r[n - 2] << 8) | r[n - 1]);
+
+    int encRespLen = n - 10;
+    uint8_t buf[16 + 256 + 2];
+    memcpy(buf, scp.mcv, 16); // R-MAC reads the MCV but must not advance it
+    memcpy(&buf[16], r, encRespLen);
+    buf[16 + encRespLen] = r[n - 2];
+    buf[16 + encRespLen + 1] = r[n - 1];
+    uint8_t full[16];
+    cmac(scp.srmac, buf, 16 + encRespLen + 2, full);
+    if (memcmp(full, &r[n - 10], 8) != 0) {
+        LOG_ERROR("SE050: R-MAC verification failed");
+        return -1;
+    }
+    if (encRespLen == 0)
+        return 0;
+
+    uint8_t icv[16];
+    encryptionIcv(true, icv);
+    uint8_t plain[256];
+    cbc(scp.senc, icv, r, encRespLen, plain, false);
+
+    int len = encRespLen; // strip the 80 00 .. padding
+    while (len > 0 && plain[len - 1] == 0x00)
+        len--;
+    if (len > 0 && plain[len - 1] == 0x80)
+        len--;
+    if (len > respCap)
+        len = respCap;
+    memcpy(resp, plain, len);
+    return len;
+}
+
+int SE050::sessionApdu(const uint8_t header[4], const uint8_t *data, int dataLen, bool expectResponse, uint8_t *resp,
+                       int respCap, uint16_t *sw)
+{
+    uint8_t od[288];
+    int j = 0;
+    int innerLc = (dataLen == 0) ? 0 : ((dataLen < 0xFF && !expectResponse) ? 1 : 3);
+    int tagLen = 4 + innerLc + dataLen;
+
+    od[j++] = 0x10; // TAG_SESSION_ID
+    od[j++] = 0x08;
+    memcpy(&od[j], sessionId, 8);
+    j += 8;
+    od[j++] = 0x41; // TAG_1 wraps the inner command
+    if (tagLen <= 0x7F) {
+        od[j++] = (uint8_t)tagLen;
+    } else if (tagLen <= 0xFF) {
+        od[j++] = 0x81;
+        od[j++] = (uint8_t)tagLen;
+    } else {
+        od[j++] = 0x82;
+        od[j++] = (uint8_t)(tagLen >> 8);
+        od[j++] = (uint8_t)tagLen;
+    }
+    memcpy(&od[j], header, 4);
+    j += 4;
+    if (dataLen > 0) {
+        if (dataLen < 0xFF && !expectResponse) {
+            od[j++] = (uint8_t)dataLen;
+        } else {
+            od[j++] = 0x00;
+            od[j++] = (uint8_t)(dataLen >> 8);
+            od[j++] = (uint8_t)dataLen;
+        }
+        memcpy(&od[j], data, dataLen);
+        j += dataLen;
+    }
+
+    static const uint8_t PROCESS_SESSION_CMD[4] = {0x80, 0x05, 0x00, 0x00};
+    return secureApdu(PROCESS_SESSION_CMD, od, j, expectResponse, resp, respCap, sw);
+}
+
+// First TLV with tag 0x41, handling BER short and long form lengths.
+const uint8_t *SE050::tlv1(const uint8_t *resp, int len, int *valueLen)
+{
+    *valueLen = 0;
+    if (len < 2 || resp[0] != 0x41)
+        return nullptr;
+    int off, l;
+    if (resp[1] == 0x82) {
+        l = (resp[2] << 8) | resp[3];
+        off = 4;
+    } else if (resp[1] == 0x81) {
+        l = resp[2];
+        off = 3;
+    } else {
+        l = resp[1];
+        off = 2;
+    }
+    if (off + l > len)
+        l = len - off;
+    *valueLen = l;
+    return &resp[off];
+}
+
+void SE050::reverse(const uint8_t *in, uint8_t *out, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        out[i] = in[len - 1 - i];
+}
+
+// --- Identity ------------------------------------------------------------
+
+namespace
+{
+constexpr uint32_t IDENTITY_OBJ = 0x4D544944u; // "MTID", the node's X25519 identity
+constexpr uint32_t AUTH_OBJ = 0x20000AAAu;     // UserID authenticator the key is bound to
+const uint8_t AUTH_PIN[8] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+
+void be32(uint32_t v, uint8_t out[4])
+{
+    out[0] = (uint8_t)(v >> 24);
+    out[1] = (uint8_t)(v >> 16);
+    out[2] = (uint8_t)(v >> 8);
+    out[3] = (uint8_t)v;
+}
+} // namespace
+
+bool SE050::identityEnsure(uint8_t publicKey[32])
+{
+    identityReady = false;
+    if (!scp.open) {
+        LOG_ERROR("SE050: identity needs an open secure channel");
+        return false;
+    }
+
+    uint8_t authId[4], keyId[4];
+    be32(AUTH_OBJ, authId);
+    be32(IDENTITY_OBJ, keyId);
+
+    uint8_t r[192];
+    uint16_t sw = 0;
+    int rl, vl;
+    const uint8_t *v;
+
+    // Applet 7.x does not ship the Montgomery curve pre-created, and key agreement
+    // against an external public key by byte-array is the one path that needs it.
+    // Idempotent: 6985 just means it already exists.
+    {
+        const uint8_t h[4] = {0x80, 0x01, 0x0B, 0x04};
+        uint8_t d[] = {0x41, 0x01, 0x41};
+        secureApdu(h, d, sizeof(d), false, r, sizeof(r), &sw);
+    }
+
+    // UserID authenticator. INS carries the AUTH_OBJECT bit (0x40). Also idempotent.
+    {
+        const uint8_t h[4] = {0x80, 0x41, 0x07, 0x00};
+        uint8_t d[] = {0x41, 0x04,       authId[0],  authId[1],  authId[2],  authId[3], 0x42,      0x08,
+                       AUTH_PIN[0], AUTH_PIN[1], AUTH_PIN[2], AUTH_PIN[3], AUTH_PIN[4], AUTH_PIN[5], AUTH_PIN[6],
+                       AUTH_PIN[7]};
+        secureApdu(h, d, sizeof(d), false, r, sizeof(r), &sw);
+    }
+
+    // Open and authenticate a UserID session nested inside the secure channel.
+    {
+        const uint8_t h[4] = {0x80, 0x04, 0x00, 0x1B};
+        uint8_t d[] = {0x41, 0x04, authId[0], authId[1], authId[2], authId[3]};
+        rl = secureApdu(h, d, sizeof(d), true, r, sizeof(r), &sw);
+        if (sw != 0x9000) {
+            LOG_ERROR("SE050: CreateSession SW=%04x", sw);
+            return false;
+        }
+        v = tlv1(r, rl, &vl);
+        if (!v || vl != 8) {
+            LOG_ERROR("SE050: unexpected session id");
+            return false;
+        }
+        memcpy(sessionId, v, 8);
+    }
+    {
+        const uint8_t h[4] = {0x80, 0x04, 0x00, 0x2C};
+        uint8_t d[] = {0x41,        0x08,        AUTH_PIN[0], AUTH_PIN[1], AUTH_PIN[2],
+                       AUTH_PIN[3], AUTH_PIN[4], AUTH_PIN[5], AUTH_PIN[6], AUTH_PIN[7]};
+        sessionApdu(h, d, sizeof(d), false, r, sizeof(r), &sw);
+        if (sw != 0x9000) {
+            LOG_ERROR("SE050: VerifySessionUserID SW=%04x", sw);
+            return false;
+        }
+    }
+
+    // Read the identity; if it is not there, generate it. Generation is persistent,
+    // so this only ever happens once per chip.
+    {
+        const uint8_t hRead[4] = {0x80, 0x02, 0x00, 0x00};
+        uint8_t dRead[] = {0x41, 0x04, keyId[0], keyId[1], keyId[2], keyId[3]};
+        rl = sessionApdu(hRead, dRead, sizeof(dRead), true, r, sizeof(r), &sw);
+        if (sw != 0x9000) {
+            LOG_INFO("SE050: no identity yet, generating X25519 in-chip (objId %08lx)", (unsigned long)IDENTITY_OBJ);
+            const uint8_t hGen[4] = {0x80, 0x01, 0x61, 0x00};
+            // Policy: bound to the UserID authenticator, allowing key agreement.
+            uint8_t dGen[] = {0x11, 0x09,     0x08,      authId[0], authId[1], authId[2], authId[3], 0x04, 0x3C, 0x00,
+                              0x00, 0x41,     0x04,      keyId[0],  keyId[1],  keyId[2],  keyId[3],  0x42, 0x01, 0x41};
+            sessionApdu(hGen, dGen, sizeof(dGen), false, r, sizeof(r), &sw);
+            if (sw != 0x9000) {
+                LOG_ERROR("SE050: WriteECKey SW=%04x", sw);
+                return false;
+            }
+            rl = sessionApdu(hRead, dRead, sizeof(dRead), true, r, sizeof(r), &sw);
+            if (sw != 0x9000) {
+                LOG_ERROR("SE050: ReadObject SW=%04x", sw);
+                return false;
+            }
+        } else {
+            LOG_INFO("SE050: reusing existing identity (objId %08lx)", (unsigned long)IDENTITY_OBJ);
+        }
+        v = tlv1(r, rl, &vl);
+        if (!v || vl < 32) {
+            LOG_ERROR("SE050: unexpected public key length %d", vl);
+            return false;
+        }
+        reverse(v, publicKey, 32); // the SE050 reports big-endian
+    }
+
+    identityReady = true;
+    return true;
+}
+
+bool SE050::identityEcdh(const uint8_t peerPublic[32], uint8_t shared[32])
+{
+    if (!identityReady)
+        return false;
+
+    uint8_t keyId[4];
+    be32(IDENTITY_OBJ, keyId);
+    uint8_t peerBe[32];
+    reverse(peerPublic, peerBe, 32);
+
+    const uint8_t h[4] = {0x80, 0x03, 0x01, 0x0F}; // INS_CRYPTO, P1_EC, P2_DH
+    uint8_t d[40];
+    int j = 0;
+    d[j++] = 0x41; // TAG_1: the on-chip private key
+    d[j++] = 0x04;
+    memcpy(&d[j], keyId, 4);
+    j += 4;
+    d[j++] = 0x42; // TAG_2: peer public key, big-endian
+    d[j++] = 0x20;
+    memcpy(&d[j], peerBe, 32);
+    j += 32;
+
+    uint8_t r[128];
+    uint16_t sw = 0;
+    int rl = sessionApdu(h, d, j, true, r, sizeof(r), &sw);
+    if (sw != 0x9000) {
+        LOG_ERROR("SE050: ECDH SW=%04x", sw);
+        return false;
+    }
+    int vl;
+    const uint8_t *v = tlv1(r, rl, &vl);
+    if (!v || vl != 32)
+        return false;
+    reverse(v, shared, 32);
+    return true;
+}
+
 bool SE050::probe()
 {
     if (!open()) {
@@ -449,10 +805,52 @@ bool SE050::probe()
         LOG_WARN("SE050: GetRandom returned SW=%04x", statusWord(r, n));
     }
 
-    if (openSecureChannel())
-        LOG_INFO("SE050: SCP03 secure channel open (chip authenticated)");
-    else
+    if (!openSecureChannel()) {
         LOG_WARN("SE050: SCP03 secure channel not established");
+        return true;
+    }
+    LOG_INFO("SE050: SCP03 secure channel open (chip authenticated)");
+
+    uint8_t ourPublic[32];
+    if (!identityEnsure(ourPublic)) {
+        LOG_WARN("SE050: identity not available");
+        return true;
+    }
+    char hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(&hex[i * 2], 3, "%02X", ourPublic[i]);
+    LOG_INFO("SE050: identity public key %s", hex);
+
+    // Equivalence check: generate a throwaway keypair in software, do the exchange
+    // both ways, and compare. If the SE050 agrees with Curve25519 byte for byte,
+    // the whole chain - byte order, curve, policy, session - is correct, and the
+    // chip can stand in for the software implementation.
+    uint8_t testPrivate[32], testPublic[32];
+    Curve25519::dh1(testPublic, testPrivate);
+
+    uint8_t sharedChip[32];
+    if (!identityEcdh(testPublic, sharedChip)) {
+        LOG_WARN("SE050: ECDH failed, cannot compare against software");
+        return true;
+    }
+
+    uint8_t sharedSoft[32];
+    memcpy(sharedSoft, ourPublic, 32);
+    if (!Curve25519::dh2(sharedSoft, testPrivate)) {
+        LOG_WARN("SE050: software side of the comparison failed");
+        return true;
+    }
+
+    if (memcmp(sharedChip, sharedSoft, 32) == 0) {
+        LOG_INFO("SE050: ECDH matches software byte for byte - hardware X25519 is usable");
+    } else {
+        for (int i = 0; i < 32; i++)
+            snprintf(&hex[i * 2], 3, "%02X", sharedChip[i]);
+        LOG_ERROR("SE050: ECDH MISMATCH, chip=%s", hex);
+        for (int i = 0; i < 32; i++)
+            snprintf(&hex[i * 2], 3, "%02X", sharedSoft[i]);
+        LOG_ERROR("SE050: ECDH MISMATCH, soft=%s", hex);
+    }
 
     return true;
 }

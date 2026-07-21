@@ -52,7 +52,17 @@ class SE050
     // only be reproduced with the right static keys and KDF.
     bool openSecureChannel();
 
-    // Layer-1/2/3 bring-up check: open, report version, random, secure channel.
+    // Ensures this node has an X25519 identity inside the SE050, generating it on
+    // first use and reusing it afterwards. The private half is created in the chip
+    // and never leaves it. Returns the public key, little-endian as the rest of
+    // Meshtastic expects. Requires an open secure channel.
+    bool identityEnsure(uint8_t publicKey[32]);
+
+    // One key agreement against the on-chip identity. Peer key and output are
+    // little-endian; the SE050 works big-endian, so both are reversed here.
+    bool identityEcdh(const uint8_t peerPublic[32], uint8_t shared[32]);
+
+    // Bring-up check for all four layers.
     bool probe();
 
   private:
@@ -75,6 +85,23 @@ class SE050
         bool open;
     };
 
+    // Runs one APDU inside the secure channel: encrypt and MAC the command, then
+    // verify and decrypt the response. Returns the plaintext length (SW stripped).
+    int secureApdu(const uint8_t header[4], const uint8_t *data, int dataLen, bool expectResponse, uint8_t *resp,
+                   int respCap, uint16_t *sw);
+
+    // Same, but nested inside a UserID session (ProcessSessionCmd). Key agreement
+    // needs the object bound to a session authenticator; the secure channel alone
+    // is only transport and is not enough.
+    int sessionApdu(const uint8_t header[4], const uint8_t *data, int dataLen, bool expectResponse, uint8_t *resp,
+                    int respCap, uint16_t *sw);
+
+    void encryptionIcv(bool response, uint8_t icv[16]);
+    static void cbc(const uint8_t key[16], const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out,
+                    bool encrypt);
+    static const uint8_t *tlv1(const uint8_t *resp, int len, int *valueLen);
+    static void reverse(const uint8_t *in, uint8_t *out, size_t len);
+
     static void cmac(const uint8_t key[16], const uint8_t *data, size_t len, uint8_t out[16]);
     static void kdf(const uint8_t key[16], uint8_t constant, uint16_t bits, const uint8_t context[16], uint8_t out[16]);
     void sessionKeys(const uint8_t context[16]);
@@ -86,6 +113,8 @@ class SE050
     uint8_t address;
     uint8_t seq = 0; // host N(S), toggled per I-block, reset by the interface reset
     Scp03 scp = {};
+    uint8_t sessionId[8] = {};
+    bool identityReady = false;
 };
 
 #endif // HAS_SE050
