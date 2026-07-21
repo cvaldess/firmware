@@ -3,7 +3,9 @@
 #if defined(HAS_SE050)
 
 #include "configuration.h"
+#include <AES.h>
 #include <Arduino.h>
+#include <string.h>
 
 #ifdef ARCH_RP2040
 #include <hardware/watchdog.h>
@@ -203,6 +205,199 @@ bool SE050::open()
     return selectApplet();
 }
 
+// --- PlatformSCP03 -------------------------------------------------------
+//
+// Factory keys for OEF 0x0001A921 (SE050E). These are the default keys NXP ships
+// in its middleware, so they are public and confer no secrecy - they only open
+// the transport channel the SE050 requires before it will do key agreement.
+static const uint8_t SCP_KEY_ENC[16] = {0xD2, 0xDB, 0x63, 0xE7, 0xA0, 0xA5, 0xAE, 0xD7,
+                                        0x2A, 0x64, 0x60, 0xC4, 0xDF, 0xDC, 0xAF, 0x64};
+static const uint8_t SCP_KEY_MAC[16] = {0x73, 0x8D, 0x5B, 0x79, 0x8E, 0xD2, 0x41, 0xB0,
+                                        0xB2, 0x47, 0x68, 0x51, 0x4B, 0xFB, 0xA9, 0x5B};
+static constexpr uint8_t SCP03_KEYVER = 0x0B;
+
+// AES-CMAC (RFC 4493). The bundled Crypto library only exposes OMAC in its EAX
+// form, which prepends a tag block, so the plain construction is done here.
+void SE050::cmac(const uint8_t key[16], const uint8_t *data, size_t len, uint8_t out[16])
+{
+    AES128 aes;
+    aes.setKey(key, 16);
+
+    // Subkeys: L = E(K, 0), K1 = dbl(L), K2 = dbl(K1); dbl left-shifts and, on
+    // carry out of the top bit, folds in the 0x87 field polynomial.
+    uint8_t k1[16] = {0}, k2[16] = {0};
+    aes.encryptBlock(k1, k1);
+    for (int round = 0; round < 2; round++) {
+        uint8_t *k = round == 0 ? k1 : k2;
+        if (round == 1)
+            memcpy(k2, k1, 16);
+        uint8_t carry = k[0] & 0x80;
+        for (int i = 0; i < 15; i++)
+            k[i] = (uint8_t)((k[i] << 1) | (k[i + 1] >> 7));
+        k[15] = (uint8_t)(k[15] << 1);
+        if (carry)
+            k[15] ^= 0x87;
+    }
+
+    uint8_t state[16] = {0};
+    size_t full = len ? (len - 1) / 16 : 0; // blocks processed before the last one
+    for (size_t b = 0; b < full; b++) {
+        for (int i = 0; i < 16; i++)
+            state[i] ^= data[b * 16 + i];
+        aes.encryptBlock(state, state);
+    }
+
+    // Last block: XOR K1 if it is exactly full, otherwise pad with 0x80 00.. and
+    // XOR K2 instead.
+    uint8_t last[16] = {0};
+    size_t rem = len - full * 16;
+    if (len > 0 && rem == 16) {
+        memcpy(last, &data[full * 16], 16);
+        for (int i = 0; i < 16; i++)
+            last[i] ^= k1[i];
+    } else {
+        memcpy(last, &data[full * 16], rem);
+        last[rem] = 0x80;
+        for (int i = 0; i < 16; i++)
+            last[i] ^= k2[i];
+    }
+    for (int i = 0; i < 16; i++)
+        state[i] ^= last[i];
+    aes.encryptBlock(out, state);
+}
+
+// SCP03 key derivation (SP800-108 in counter mode, CMAC as the PRF).
+void SE050::kdf(const uint8_t key[16], uint8_t constant, uint16_t bits, const uint8_t context[16], uint8_t out[16])
+{
+    uint8_t dd[32];
+    memset(dd, 0, 11);
+    dd[11] = constant;
+    dd[12] = 0x00;
+    dd[13] = (uint8_t)(bits >> 8);
+    dd[14] = (uint8_t)(bits & 0xFF);
+    dd[15] = 0x01;
+    memcpy(&dd[16], context, 16);
+    cmac(key, dd, sizeof(dd), out);
+}
+
+void SE050::sessionKeys(const uint8_t context[16])
+{
+    kdf(SCP_KEY_ENC, 0x04, 128, context, scp.senc);
+    kdf(SCP_KEY_MAC, 0x06, 128, context, scp.smac);
+    kdf(SCP_KEY_MAC, 0x07, 128, context, scp.srmac);
+}
+
+// Cryptograms are the first 8 bytes of a 64-bit derivation off S-MAC.
+void SE050::cryptogram(uint8_t constant, const uint8_t context[16], uint8_t out[8])
+{
+    uint8_t full[16];
+    kdf(scp.smac, constant, 64, context, full);
+    memcpy(out, full, 8);
+}
+
+// C-MAC over MCV || command, updating the MCV to the full CMAC so successive
+// commands chain.
+void SE050::chainedCmac(const uint8_t *cmd, size_t len, uint8_t mac[8])
+{
+    uint8_t buf[16 + 288];
+    if (16 + len > sizeof(buf))
+        return;
+    memcpy(buf, scp.mcv, 16);
+    memcpy(&buf[16], cmd, len);
+    uint8_t full[16];
+    cmac(scp.smac, buf, 16 + len, full);
+    memcpy(scp.mcv, full, 16);
+    memcpy(mac, full, 8);
+}
+
+bool SE050::initializeUpdate(const uint8_t hostChallenge[8], uint8_t cardChallenge[8], uint8_t cardCryptogram[8])
+{
+    uint8_t iu[] = {0x80,
+                    0x50,
+                    SCP03_KEYVER,
+                    0x00,
+                    0x08,
+                    hostChallenge[0],
+                    hostChallenge[1],
+                    hostChallenge[2],
+                    hostChallenge[3],
+                    hostChallenge[4],
+                    hostChallenge[5],
+                    hostChallenge[6],
+                    hostChallenge[7],
+                    0x00};
+    uint8_t r[64];
+    int n = transceive(iu, sizeof(iu), r, sizeof(r));
+    if (statusWord(r, n) != 0x9000 || n < 31) {
+        LOG_ERROR("SE050: INITIALIZE UPDATE (keyver=%02x) SW=%04x n=%d", SCP03_KEYVER, statusWord(r, n), n);
+        return false;
+    }
+    // keyDivData(10) || keyInfo(3) || cardChallenge(8) || cardCryptogram(8)
+    memcpy(cardChallenge, &r[13], 8);
+    memcpy(cardCryptogram, &r[21], 8);
+    return true;
+}
+
+bool SE050::openSecureChannel()
+{
+    memset(&scp, 0, sizeof(scp));
+
+    uint8_t hostChallenge[8];
+    for (size_t i = 0; i < sizeof(hostChallenge); i++)
+        hostChallenge[i] = (uint8_t)random(256);
+
+    uint8_t cardChallenge[8], cardCryptogram[8];
+    if (!initializeUpdate(hostChallenge, cardChallenge, cardCryptogram))
+        return false;
+
+    uint8_t context[16];
+    memcpy(context, hostChallenge, 8);
+    memcpy(&context[8], cardChallenge, 8);
+    sessionKeys(context);
+
+    // If this does not match, the static keys or the KDF are wrong - there is no
+    // point continuing, and it is also how the chip authenticates itself to us.
+    uint8_t expected[8];
+    cryptogram(0x00, context, expected);
+    if (memcmp(expected, cardCryptogram, 8) != 0) {
+        LOG_ERROR("SE050: card cryptogram mismatch - keys rotated, or a different KDF");
+        return false;
+    }
+
+    uint8_t hostCryptogram[8];
+    cryptogram(0x01, context, hostCryptogram);
+
+    // EXTERNAL AUTHENTICATE. CLA 0x84 carries the security bit; P1 0x33 asks for
+    // C-DEC | C-MAC | R-MAC | R-ENC. Lc covers the cryptogram plus its C-MAC, and
+    // the C-MAC chains from the still-zero MCV.
+    uint8_t cmd[13];
+    cmd[0] = 0x84;
+    cmd[1] = 0x82;
+    cmd[2] = 0x33;
+    cmd[3] = 0x00;
+    cmd[4] = 0x10;
+    memcpy(&cmd[5], hostCryptogram, 8);
+
+    uint8_t mac[8];
+    chainedCmac(cmd, sizeof(cmd), mac);
+
+    uint8_t apdu[sizeof(cmd) + 8];
+    memcpy(apdu, cmd, sizeof(cmd));
+    memcpy(&apdu[sizeof(cmd)], mac, 8);
+
+    uint8_t r[32];
+    int n = transceive(apdu, sizeof(apdu), r, sizeof(r));
+    uint16_t sw = statusWord(r, n);
+    if (sw != 0x9000) {
+        LOG_ERROR("SE050: EXTERNAL AUTHENTICATE SW=%04x - channel not open", sw);
+        return false;
+    }
+
+    scp.open = true;
+    scp.counter = 0; // the first wrapped command increments this to 1
+    return true;
+}
+
 bool SE050::probe()
 {
     if (!open()) {
@@ -253,6 +448,11 @@ bool SE050::probe()
     } else {
         LOG_WARN("SE050: GetRandom returned SW=%04x", statusWord(r, n));
     }
+
+    if (openSecureChannel())
+        LOG_INFO("SE050: SCP03 secure channel open (chip authenticated)");
+    else
+        LOG_WARN("SE050: SCP03 secure channel not established");
 
     return true;
 }

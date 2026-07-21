@@ -43,7 +43,16 @@ class SE050
     // Trailing status word of an R-APDU.
     static uint16_t statusWord(const uint8_t *resp, int len);
 
-    // Layer-1/2 bring-up check: open, read the applet version, pull random bytes.
+    // Opens a PlatformSCP03 secure channel on top of an already-open applet:
+    // INITIALIZE UPDATE, derive the session keys, verify the card cryptogram,
+    // then EXTERNAL AUTHENTICATE. The SE050 refuses key agreement outside an
+    // authenticated channel, so this is a prerequisite, not a hardening step.
+    //
+    // Verifying the card cryptogram also authenticates the chip to us: it can
+    // only be reproduced with the right static keys and KDF.
+    bool openSecureChannel();
+
+    // Layer-1/2/3 bring-up check: open, report version, random, secure channel.
     bool probe();
 
   private:
@@ -55,9 +64,28 @@ class SE050
 
     static uint16_t crc(const uint8_t *data, size_t len);
 
+    // SCP03 session state. mcv is the MAC chaining value: zero until the first
+    // C-MAC, then the full CMAC of the previous command.
+    struct Scp03 {
+        uint8_t senc[16];  // command data encryption
+        uint8_t smac[16];  // command MAC
+        uint8_t srmac[16]; // response MAC
+        uint8_t mcv[16];
+        uint32_t counter; // command counter, drives the encryption ICV
+        bool open;
+    };
+
+    static void cmac(const uint8_t key[16], const uint8_t *data, size_t len, uint8_t out[16]);
+    static void kdf(const uint8_t key[16], uint8_t constant, uint16_t bits, const uint8_t context[16], uint8_t out[16]);
+    void sessionKeys(const uint8_t context[16]);
+    void cryptogram(uint8_t constant, const uint8_t context[16], uint8_t out[8]);
+    void chainedCmac(const uint8_t *cmd, size_t len, uint8_t mac[8]);
+    bool initializeUpdate(const uint8_t hostChallenge[8], uint8_t cardChallenge[8], uint8_t cardCryptogram[8]);
+
     TwoWire &bus;
     uint8_t address;
     uint8_t seq = 0; // host N(S), toggled per I-block, reset by the interface reset
+    Scp03 scp = {};
 };
 
 #endif // HAS_SE050
