@@ -33,6 +33,9 @@
 #if !MESHTASTIC_EXCLUDE_I2C
 #include "detect/ScanI2CConsumer.h"
 #include "detect/ScanI2CTwoWire.h"
+#if defined(HAS_SE050)
+#include "security/SE050.h"
+#endif
 #include <Wire.h>
 #endif
 #include "detect/einkScan.h"
@@ -660,6 +663,17 @@ void setup()
         sensor_detected = true;
 #endif
     }
+
+#if defined(HAS_SE050)
+    // Secure element bring-up: only talk T=1oI2C to it if the scan actually saw one.
+    {
+        auto se050Info = i2cScanner->find(ScanI2C::DeviceType::NXP_SE050);
+        if (se050Info.type != ScanI2C::DeviceType::NONE) {
+            SE050 se050(se050Info.address.port == ScanI2C::I2CPort::WIRE1 ? Wire1 : Wire, se050Info.address.address);
+            se050.probe();
+        }
+    }
+#endif
 #ifdef ARCH_ESP32
 #ifdef DEBUG_PARTITION_TABLE
     printPartitionTable();
