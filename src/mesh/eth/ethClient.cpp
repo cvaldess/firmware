@@ -19,11 +19,17 @@
 #endif
 #ifdef USE_ARDUINO_ETHERNET
 #include <Ethernet.h> // arduino-libraries/Ethernet - supports W5100/W5200/W5500
-// Shorter DHCP timeout so LoRa startup isn't blocked when no DHCP server is present.
-#define ETH_DHCP_TIMEOUT_MS 10000
 #else
 #include <RAK13800_W5100S.h>
 #endif
+// Shorter DHCP timeout so LoRa startup isn't blocked when no DHCP server is present.
+// Must apply to BOTH drivers: RAK13800_W5100S::begin() defaults to a 60s timeout
+// (arduino-libraries/Ethernet does too), and a boot-time block that long is fatal.
+// The RP2350 watchdog is not disarmed by a watchdog-induced reset, so once one
+// fires, every later boot still has the 8s watchdog running while initEthernet()
+// blocks in setup() - a self-sustaining reboot loop with no cable or no DHCP
+// server. Seen on wiznet_5100s_evb_pico2_e22p, which had no timeout at all.
+#define ETH_DHCP_TIMEOUT_MS 10000
 #include <SPI.h>
 
 #ifdef ARCH_RP2040
@@ -341,11 +347,12 @@ bool initEthernet()
             // cold-boot probe can occasionally miss a still-settling chip, so on
             // EthernetNoHardware re-pulse reset and retry before giving up.
             for (int tries = 0; tries < 3; tries++) {
-#ifdef ETH_DHCP_TIMEOUT_MS
+                // Start each attempt with a full watchdog window. Normally the
+                // watchdog is not yet armed here (rp2040Loop() arms it from loop(),
+                // after setup()), but a watchdog-induced reset leaves it running, so
+                // on those boots this call is what keeps the retries from compounding.
+                FEED_WATCHDOG();
                 status = Ethernet.begin(mac, ETH_DHCP_TIMEOUT_MS);
-#else
-                status = Ethernet.begin(mac);
-#endif
                 if (status != 0 || Ethernet.hardwareStatus() != EthernetNoHardware)
                     break; // got an IP, or the chip is present (a link/DHCP issue retrying won't fix)
                 LOG_WARN("W5500 not detected, re-pulsing reset and retrying (%d)", tries + 1);
