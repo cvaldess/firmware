@@ -922,15 +922,48 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
                 break;
 
             case 0x48: {
-                i2cBus->beginTransmission(addr.address);
-                uint8_t getInfo[] = {0x5A, 0xC0, 0x00, 0xFF, 0xFC};
-                uint8_t expectedInfo[] = {0xa5, 0xE0, 0x00, 0x3F, 0x19};
-                uint8_t info[5];
-                size_t len = 0;
-                i2cBus->write(getInfo, 5);
-                i2cBus->endTransmission();
-                len = i2cBus->readBytes(info, 5);
-                if (len == 5 && memcmp(expectedInfo, info, len) == 0) {
+                // SE050 probe: a T=1oI2C soft reset (S-block) - NAD=0x5A PCB=0xC0 LEN=0x00
+                // plus CRC - which the chip answers with A5 E0 00 3F 19.
+                //
+                // The answer must be fetched with requestFrom(). readBytes() alone only
+                // drains the Wire RX buffer, and requestFrom() is what fills it, so
+                // without it the read returns 0 bytes after burning Stream's 1s timeout
+                // and every SE050 falls through to the FT6336U branch below.
+                //
+                // The SE050 also NACKs while it is still starting up or preparing the
+                // answer, so retry a few times with a short guard delay rather than
+                // deciding on a single attempt.
+                const uint8_t getInfo[] = {0x5A, 0xC0, 0x00, 0xFF, 0xFC};
+                const uint8_t expectedInfo[] = {0xA5, 0xE0, 0x00, 0x3F, 0x19};
+                uint8_t info[sizeof(expectedInfo)] = {0};
+                size_t lastLen = 0;
+                bool isSE050 = false;
+
+                for (uint8_t attempt = 0; attempt < 3 && !isSE050; attempt++) {
+                    i2cBus->beginTransmission(addr.address);
+                    i2cBus->write(getInfo, sizeof(getInfo));
+                    if (i2cBus->endTransmission() != 0) {
+                        delay(5); // chip not ready to accept the frame yet
+                        continue;
+                    }
+                    delay(2); // guard time before the answer can be read back
+                    lastLen = i2cBus->requestFrom((uint8_t)addr.address, (uint8_t)sizeof(info));
+                    if (lastLen == sizeof(info)) {
+                        for (size_t i = 0; i < sizeof(info); i++)
+                            info[i] = i2cBus->read();
+                        isSE050 = (memcmp(expectedInfo, info, sizeof(info)) == 0);
+                    }
+                    if (!isSE050)
+                        delay(5);
+                }
+
+                // Distinguishes "nothing came back" from "something answered, but not an
+                // SE050" - the two need very different follow-up.
+                if (!isSE050)
+                    LOG_DEBUG("0x48 not an SE050: got %u bytes %02x %02x %02x %02x %02x", (unsigned)lastLen, info[0], info[1],
+                              info[2], info[3], info[4]);
+
+                if (isSE050) {
                     LOG_INFO("NXP SE050 crypto chip found");
                     type = NXP_SE050;
                     break;
