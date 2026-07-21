@@ -1,6 +1,11 @@
 name: FlashMesh — Publish W5500 Variants
 
-# Manual trigger only. Run after merging upstream into develop.
+# Manual trigger only. ALWAYS run with --ref generate-catalog, NEVER from develop:
+#   gh workflow run flashmesh_publish.yml -R cvaldess/firmware --ref generate-catalog \
+#     -f version_prefix=2.8.0 -f force_rebuild=false
+# develop is only the upstream sync point; generate-catalog carries the fork-only eth/OTA
+# commits, so publishing from develop ships public images that are missing them.
+# Order of operations: sync upstream -> develop, merge develop -> generate-catalog, then run this.
 # Builds the two W5500 variants and POSTs each to /api/admin/upload on flasher.cvaldess.com.
 # Skips per-variant if the current SHA7 is already in the catalog (override with force_rebuild).
 
