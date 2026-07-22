@@ -618,6 +618,28 @@ void setup()
     digitalWrite(AQ_SET_PIN, HIGH);
 #endif
 
+#ifdef SE050_ENA_PIN
+    // The SE050 has no reset line, and it survives an MCU reset in whatever state it
+    // was left in - typically refusing to ack 0x48 until the board is power cycled by
+    // hand. ENA switches its internal regulator, so pulsing it here is the only way to
+    // hand the secure element a clean power-on reset, and it has to happen before the
+    // I2C scan that is supposed to find it.
+    //
+    // Boards where ENA is strapped to the rail simply do not define SE050_ENA_PIN.
+    // 2us of ENA low is enough to enter deep power-down (tENalt, datasheet 14.2), but
+    // the pull-up and the filter capacitor on that node make the edges slow, so both
+    // delays are generous rather than minimal.
+    // The settle time is empirical: the datasheet gives no figure for "ENA high to
+    // ready". With 10ms the chip already acked its address but answered the T=1oI2C
+    // soft reset with nothing, and the scanner's probe is single shot, so a short
+    // wait here costs the detection entirely.
+    pinMode(SE050_ENA_PIN, OUTPUT);
+    digitalWrite(SE050_ENA_PIN, LOW);
+    delay(5);
+    digitalWrite(SE050_ENA_PIN, HIGH);
+    delay(250);
+#endif
+
     // Currently only the tbeam has a PMU
     // PMU initialization needs to be placed before i2c scanning
     power = new Power();
