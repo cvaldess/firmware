@@ -18,25 +18,36 @@
 //
 // Measured cost is ~64ms per agreement against ~27ms for the bundled Curve25519.
 
-#ifdef ARCH_RP2040
-// Where the key agreement runs, reported the first time and whenever it gets
-// deeper, so the number lands in syslog on a live node.
+// Not freertosinc.h: it keys off ARDUINO_ARCH_RP2040, which this variant never
+// defines, so on RP2350 it hands out the placeholder definitions instead of the
+// real ones. __FREERTOS is what rp2350_base actually sets.
+#if defined(ARCH_RP2040) && defined(__FREERTOS)
+#include <FreeRTOS.h>
+#include <task.h>
+
+// How close the key agreement comes to running out of stack.
 //
-// Only the address, deliberately. The obvious version of this subtracted
-// __StackBottom to print the headroom, and came back with 4294541880 - a
-// negative number - which says the frame sits some 400 KB below the linker's
-// core 0 stack in SCRATCH_Y. So this code does not run on that stack at all,
-// and any "bytes left" computed against it would be fiction. Finding out which
-// stack it does run on, and how big it is, is the open question; until then the
-// raw address is the honest thing to log, and comparing two of them still shows
-// the depth this path reaches.
+// Meshtastic builds this core with -D__FREERTOS=1, so setup() and loop() - and
+// therefore the whole packet path - run in the framework's CORE0 task, created
+// as xTaskCreate(__core0, "CORE0", 1024, ...) in freertos-main.cpp. That depth
+// is in words: 4 KB, allocated from the FreeRTOS heap, which is why the frames
+// here sit in main SRAM and nowhere near the linker's SCRATCH_Y stack.
+//
+// 4 KB is the whole budget for a call chain that reaches encryptCurve25519, and
+// the driver's buffers used to take 2.5 KB of it. FreeRTOS is built with
+// configCHECK_FOR_STACK_OVERFLOW 2 and arduino-pico's hook calls
+// panic("Stack overflow"), so the failure mode was not corruption: the overflow
+// was detected and the board was reset on purpose. That is the reboot.
+//
+// uxTaskGetStackHighWaterMark reports the minimum free the task has ever had,
+// in words, so this is the real margin rather than an inference from addresses.
 static void reportStackDepth()
 {
-    uintptr_t frame = (uintptr_t)__builtin_frame_address(0);
-    static uintptr_t low = UINTPTR_MAX;
-    if (frame < low) {
-        low = frame;
-        LOG_INFO("SE050: key agreement frame at 0x%08x, deepest so far", (unsigned)frame);
+    size_t freeBytes = (size_t)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t);
+    static size_t low = SIZE_MAX;
+    if (freeBytes < low) {
+        low = freeBytes;
+        LOG_INFO("SE050: key agreement leaves %u bytes of the 4 KB CORE0 task stack", (unsigned)freeBytes);
     }
 }
 #else
@@ -50,14 +61,15 @@ class SE050CryptoEngine : public CryptoEngine
     // route through it, so this single override captures the whole ECDH path.
     virtual bool setDHPublicKey(uint8_t *pubKey) override
     {
-        reportStackDepth();
         if (!mirrorReady())
             return CryptoEngine::setDHPublicKey(pubKey);
 
         uint8_t peer[32];
         memcpy(peer, pubKey, 32);
         uint8_t agreed[32];
-        if (!se050->identityEcdh(peer, agreed)) {
+        bool ok = se050->identityEcdh(peer, agreed);
+        reportStackDepth(); // after the agreement: the deep part is behind us and counted
+        if (!ok) {
             LOG_WARN("SE050: key agreement failed, falling back to software");
             return CryptoEngine::setDHPublicKey(pubKey);
         }
