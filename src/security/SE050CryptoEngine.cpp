@@ -109,7 +109,14 @@ class SE050CryptoEngine : public CryptoEngine
         }
 
         uint8_t pub[32];
-        if (!se050->identityImport(private_key, pub)) {
+#ifdef SE050_REPLACE_MIRROR
+        // One-shot: discards a mirror left behind by a previous node identity.
+        // Meant to be flashed once and taken back out, not carried in a build.
+        const bool replaceStale = true;
+#else
+        const bool replaceStale = false;
+#endif
+        if (!se050->identityImport(private_key, pub, replaceStale)) {
             LOG_WARN("SE050: could not mirror the node key, staying on software crypto");
             return false;
         }
@@ -133,6 +140,19 @@ class SE050CryptoEngine : public CryptoEngine
         }
         if (memfll(private_key, 0, sizeof(private_key))) {
             LOG_WARN("SE050: self-test skipped, node has no private key yet");
+            return;
+        }
+
+        // Check the chip is actually in the path before comparing anything.
+        //
+        // Without this the test was worthless in the one case that matters: if
+        // the mirror is unavailable, setDHPublicKey falls back to software, and
+        // the test then compares software against software and reports "OK".
+        // It did exactly that on a node whose mirror held a stale key - green
+        // light, software crypto, nobody the wiser. A test that cannot fail is
+        // not a test.
+        if (!mirrorReady()) {
+            LOG_ERROR("SE050: self-test FAILED - key agreement is not running on the chip, PKI stays in software");
             return;
         }
 

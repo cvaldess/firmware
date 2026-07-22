@@ -65,8 +65,10 @@ class SE050
     //
     // Returns false and writes nothing if the object exists holding a different
     // key - rotating an identity means deleting the object first, which is a
-    // deliberate decision and not something to do implicitly.
-    bool identityImport(const uint8_t privateKey[32], uint8_t publicKeyOut[32]);
+    // deliberate decision and not something to do implicitly. Pass replaceStale
+    // to make that decision explicitly: the old object is deleted and the
+    // current node key mirrored in its place.
+    bool identityImport(const uint8_t privateKey[32], uint8_t publicKeyOut[32], bool replaceStale = false);
 
     // One key agreement against the on-chip identity. Peer key and output are
     // little-endian; the SE050 works big-endian, so both are reversed here.

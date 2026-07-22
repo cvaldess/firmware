@@ -798,7 +798,7 @@ bool SE050::identityEnsure(uint8_t publicKey[32])
     return true;
 }
 
-bool SE050::identityImport(const uint8_t privateKey[32], uint8_t publicKeyOut[32])
+bool SE050::identityImport(const uint8_t privateKey[32], uint8_t publicKeyOut[32], bool replaceStale)
 {
     identityReady = false;
     if (!identitySession())
@@ -837,8 +837,27 @@ bool SE050::identityImport(const uint8_t privateKey[32], uint8_t publicKeyOut[32
                 return true;
             }
         }
-        LOG_WARN("SE050: objId %08lx holds a different key - refusing to overwrite an identity", (unsigned long)NODE_KEY_OBJ);
-        return false;
+        if (!replaceStale) {
+            LOG_WARN("SE050: objId %08lx holds a different key - refusing to overwrite an identity",
+                     (unsigned long)NODE_KEY_OBJ);
+            LOG_WARN("SE050: build with -D SE050_REPLACE_MIRROR once to discard it and mirror the current node key");
+            return false;
+        }
+
+        // Asked for explicitly, and only then. The stale object is a mirror of a
+        // node key that no longer exists, so nothing is lost with it - but that
+        // is a judgement about this object in this stage of the port, not one
+        // the driver gets to make on its own for any key it finds in the way.
+        LOG_WARN("SE050: objId %08lx holds a different key - replacing it as asked", (unsigned long)NODE_KEY_OBJ);
+        const uint8_t hDelete[4] = {0x80, 0x04, 0x00, 0x28};
+        uint8_t dDelete[] = {0x41, 0x04, keyId[0], keyId[1], keyId[2], keyId[3]};
+        sessionApdu(hDelete, dDelete, sizeof(dDelete), false, r, sizeof(r), &sw);
+        if (sw != 0x9000) {
+            // 6985 here means the object's own policy does not carry ALLOW_DELETE,
+            // in which case it cannot be removed through this session at all.
+            LOG_ERROR("SE050: DeleteSecureObject SW=%04x, the stale mirror stays", sw);
+            return false;
+        }
     }
 
     // Montgomery keys go in big-endian, private half included (AN12413 section 7.2).
