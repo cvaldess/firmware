@@ -8,6 +8,8 @@
 #include <Arduino.h>
 #include <string.h>
 
+SE050 *se050 = nullptr;
+
 #ifdef ARCH_RP2040
 #include <hardware/watchdog.h>
 #define SE050_FEED_WATCHDOG() watchdog_update()
@@ -606,6 +608,10 @@ void SE050::reverse(const uint8_t *in, uint8_t *out, size_t len)
 namespace
 {
 constexpr uint32_t IDENTITY_OBJ = 0x4D544944u; // "MTID", the node's X25519 identity
+// "MTKY", the mirrored copy of the key Meshtastic already holds in its config.
+// Deliberately a different object from MTID so the chip-generated identity, and
+// the self-test that leans on it, stay intact.
+constexpr uint32_t NODE_KEY_OBJ = 0x4D544B59u;
 constexpr uint32_t AUTH_OBJ = 0x20000AAAu;     // UserID authenticator the key is bound to
 const uint8_t AUTH_PIN[8] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
 
@@ -618,17 +624,18 @@ void be32(uint32_t v, uint8_t out[4])
 }
 } // namespace
 
-bool SE050::identityEnsure(uint8_t publicKey[32])
+// Curve, authenticator and UserID session: everything an identity object needs
+// before it can be created, read or used. Every step is idempotent, so both the
+// generate and the import path open with this.
+bool SE050::identitySession()
 {
-    identityReady = false;
     if (!scp.open) {
         LOG_ERROR("SE050: identity needs an open secure channel");
         return false;
     }
 
-    uint8_t authId[4], keyId[4];
+    uint8_t authId[4];
     be32(AUTH_OBJ, authId);
-    be32(IDENTITY_OBJ, keyId);
 
     uint8_t r[192];
     uint16_t sw = 0;
@@ -679,6 +686,23 @@ bool SE050::identityEnsure(uint8_t publicKey[32])
             return false;
         }
     }
+    return true;
+}
+
+bool SE050::identityEnsure(uint8_t publicKey[32])
+{
+    identityReady = false;
+    if (!identitySession())
+        return false;
+
+    uint8_t authId[4], keyId[4];
+    be32(AUTH_OBJ, authId);
+    be32(IDENTITY_OBJ, keyId);
+
+    uint8_t r[192];
+    uint16_t sw = 0;
+    int rl, vl;
+    const uint8_t *v;
 
     // Read the identity; if it is not there, generate it. Generation is persistent,
     // so this only ever happens once per chip.
@@ -713,6 +737,114 @@ bool SE050::identityEnsure(uint8_t publicKey[32])
         reverse(v, publicKey, 32); // the SE050 reports big-endian
     }
 
+    activeKeyObj = IDENTITY_OBJ;
+    identityReady = true;
+    return true;
+}
+
+bool SE050::identityImport(const uint8_t privateKey[32], uint8_t publicKeyOut[32])
+{
+    identityReady = false;
+    if (!identitySession())
+        return false;
+
+    uint8_t authId[4], keyId[4];
+    be32(AUTH_OBJ, authId);
+    be32(NODE_KEY_OBJ, keyId);
+
+    // WriteECKey wants both halves of a key pair or neither, and Meshtastic only
+    // keeps the private one, so derive the public half here.
+    uint8_t privLe[32], pubLe[32];
+    memcpy(privLe, privateKey, 32);
+    Curve25519::eval(pubLe, privLe, 0);
+    memcpy(publicKeyOut, pubLe, 32);
+
+    uint8_t r[192];
+    uint16_t sw = 0;
+    int rl, vl;
+    const uint8_t *v;
+
+    // Already there? Compare before writing. This is what keeps the NVM write to
+    // once per node instead of once per boot.
+    const uint8_t hRead[4] = {0x80, 0x02, 0x00, 0x00};
+    uint8_t dRead[] = {0x41, 0x04, keyId[0], keyId[1], keyId[2], keyId[3]};
+    rl = sessionApdu(hRead, dRead, sizeof(dRead), true, r, sizeof(r), &sw);
+    if (sw == 0x9000) {
+        v = tlv1(r, rl, &vl);
+        uint8_t onChip[32];
+        if (v && vl >= 32) {
+            reverse(v, onChip, 32); // the SE050 reports big-endian
+            if (memcmp(onChip, pubLe, 32) == 0) {
+                LOG_INFO("SE050: node key already mirrored (objId %08lx)", (unsigned long)NODE_KEY_OBJ);
+                activeKeyObj = NODE_KEY_OBJ;
+                identityReady = true;
+                return true;
+            }
+        }
+        LOG_WARN("SE050: objId %08lx holds a different key - refusing to overwrite an identity", (unsigned long)NODE_KEY_OBJ);
+        return false;
+    }
+
+    // Montgomery keys go in big-endian, private half included (AN12413 section 7.2).
+    uint8_t privBe[32], pubBe[32];
+    reverse(privLe, privBe, 32);
+    reverse(pubLe, pubBe, 32);
+
+    LOG_INFO("SE050: mirroring node key into the chip (objId %08lx)", (unsigned long)NODE_KEY_OBJ);
+    uint8_t d[128];
+    int j = 0;
+    // Policy: bound to the UserID authenticator, allowing key agreement.
+    d[j++] = 0x11;
+    d[j++] = 0x09;
+    d[j++] = 0x08;
+    memcpy(&d[j], authId, 4);
+    j += 4;
+    d[j++] = 0x04;
+    d[j++] = 0x3C;
+    d[j++] = 0x00;
+    d[j++] = 0x00;
+    d[j++] = 0x41; // TAG_1: object id
+    d[j++] = 0x04;
+    memcpy(&d[j], keyId, 4);
+    j += 4;
+    d[j++] = 0x42; // TAG_2: curve
+    d[j++] = 0x01;
+    d[j++] = 0x41;
+    d[j++] = 0x43; // TAG_3: private half
+    d[j++] = 0x20;
+    memcpy(&d[j], privBe, 32);
+    j += 32;
+    d[j++] = 0x44; // TAG_4: public half
+    d[j++] = 0x20;
+    memcpy(&d[j], pubBe, 32);
+    j += 32;
+
+    const uint8_t hWrite[4] = {0x80, 0x01, 0x61, 0x00}; // P1_EC | P1_KEY_PAIR
+    sessionApdu(hWrite, d, j, false, r, sizeof(r), &sw);
+    if (sw != 0x9000) {
+        LOG_ERROR("SE050: WriteECKey (import) SW=%04x", sw);
+        return false;
+    }
+
+    // Read it back: proves the byte order was right rather than assuming it.
+    rl = sessionApdu(hRead, dRead, sizeof(dRead), true, r, sizeof(r), &sw);
+    if (sw != 0x9000) {
+        LOG_ERROR("SE050: ReadObject after import SW=%04x", sw);
+        return false;
+    }
+    v = tlv1(r, rl, &vl);
+    uint8_t readBack[32];
+    if (!v || vl < 32) {
+        LOG_ERROR("SE050: unexpected public key length %d after import", vl);
+        return false;
+    }
+    reverse(v, readBack, 32);
+    if (memcmp(readBack, pubLe, 32) != 0) {
+        LOG_ERROR("SE050: imported key does not read back - byte order is wrong");
+        return false;
+    }
+
+    activeKeyObj = NODE_KEY_OBJ;
     identityReady = true;
     return true;
 }
@@ -723,7 +855,7 @@ bool SE050::identityEcdh(const uint8_t peerPublic[32], uint8_t shared[32])
         return false;
 
     uint8_t keyId[4];
-    be32(IDENTITY_OBJ, keyId);
+    be32(activeKeyObj, keyId);
     uint8_t peerBe[32];
     reverse(peerPublic, peerBe, 32);
 

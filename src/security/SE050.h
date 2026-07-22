@@ -58,6 +58,16 @@ class SE050
     // Meshtastic expects. Requires an open secure channel.
     bool identityEnsure(uint8_t publicKey[32]);
 
+    // Mirrors an existing X25519 private key into the chip so the SE050 can run the
+    // key agreement for an identity Meshtastic already owns. Idempotent: if the
+    // object already holds this key nothing is written, so the NVM write happens
+    // once in the life of the node rather than once per boot.
+    //
+    // Returns false and writes nothing if the object exists holding a different
+    // key - rotating an identity means deleting the object first, which is a
+    // deliberate decision and not something to do implicitly.
+    bool identityImport(const uint8_t privateKey[32], uint8_t publicKeyOut[32]);
+
     // One key agreement against the on-chip identity. Peer key and output are
     // little-endian; the SE050 works big-endian, so both are reversed here.
     bool identityEcdh(const uint8_t peerPublic[32], uint8_t shared[32]);
@@ -71,6 +81,10 @@ class SE050
     size_t xfer(const uint8_t *tx, size_t txLen, uint8_t *rx, size_t rxCap);
 
     bool selectApplet();
+
+    // Curve, authenticator and UserID session - the idempotent preamble both
+    // identity paths need before they can touch a key object.
+    bool identitySession();
 
     static uint16_t crc(const uint8_t *data, size_t len);
 
@@ -115,6 +129,23 @@ class SE050
     Scp03 scp = {};
     uint8_t sessionId[8] = {};
     bool identityReady = false;
+    // Which key object identityEcdh works against: the chip-generated identity or
+    // the mirrored node key, depending on which path prepared it.
+    uint32_t activeKeyObj = 0;
 };
+
+// The instance the boot probe left behind, or null if this board has no SE050 or
+// the chip did not answer. Anything wanting to use the secure element after boot
+// goes through this rather than opening its own channel.
+extern SE050 *se050;
+
+#if defined(HAS_CUSTOM_CRYPTO_ENGINE)
+// Drives one key agreement through the live CryptoEngine and checks the chip
+// against the software implementation. Called once NodeDB has loaded the node's
+// private key, because that is what the mirror copies into the SE050. Doing this
+// on the real object, rather than on a scratch instance, is the point: it proves
+// the path packets actually take.
+void se050CryptoSelfTest();
+#endif
 
 #endif // HAS_SE050

@@ -691,8 +691,13 @@ void setup()
     {
         auto se050Info = i2cScanner->find(ScanI2C::DeviceType::NXP_SE050);
         if (se050Info.type != ScanI2C::DeviceType::NONE) {
-            SE050 se050(se050Info.address.port == ScanI2C::I2CPort::WIRE1 ? Wire1 : Wire, se050Info.address.address);
-            se050.probe();
+            // Outlives setup: the crypto engine talks to the chip for the rest of the
+            // run, and reopening the secure channel per operation would be absurd.
+            se050 = new SE050(se050Info.address.port == ScanI2C::I2CPort::WIRE1 ? Wire1 : Wire, se050Info.address.address);
+            if (!se050->probe()) {
+                delete se050;
+                se050 = nullptr;
+            }
         }
     }
 #endif
@@ -863,6 +868,13 @@ void setup()
     // We do this as early as possible because this loads preferences from flash
     // but we need to do this after main cpu init (esp32setup), because we need the random seed set
     nodeDB = new NodeDB;
+
+#if defined(HAS_SE050) && defined(HAS_CUSTOM_CRYPTO_ENGINE)
+    // NodeDB has just loaded the identity, which is what the secure element mirrors,
+    // so this is the first moment the hardware PKI path can be exercised end to end.
+    se050CryptoSelfTest();
+#endif
+
 #ifdef ARCH_ESP32
     // Config is loaded now, and Bluetooth has not been initialized yet. If the
     // saved config will keep Bluetooth inactive, return its reserved memory early.
