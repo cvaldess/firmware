@@ -868,13 +868,6 @@ void setup()
     // We do this as early as possible because this loads preferences from flash
     // but we need to do this after main cpu init (esp32setup), because we need the random seed set
     nodeDB = new NodeDB;
-
-#if defined(HAS_SE050) && defined(HAS_CUSTOM_CRYPTO_ENGINE)
-    // NodeDB has just loaded the identity, which is what the secure element mirrors,
-    // so this is the first moment the hardware PKI path can be exercised end to end.
-    se050CryptoSelfTest();
-#endif
-
 #ifdef ARCH_ESP32
     // Config is loaded now, and Bluetooth has not been initialized yet. If the
     // saved config will keep Bluetooth inactive, return its reserved memory early.
@@ -1185,6 +1178,13 @@ void setup()
     // Initialize Ethernet
     initEthernet();
 #endif
+#endif
+
+#if defined(HAS_SE050) && defined(HAS_CUSTOM_CRYPTO_ENGINE)
+    // Deliberately after the network is up, not next to NodeDB where the identity
+    // is actually loaded. If this ever hangs again, the board still answers over
+    // Ethernet and can be recovered without pulling it apart for a manual BOOTSEL.
+    se050CryptoSelfTest();
 #endif
 
 #if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_WEBSERVER

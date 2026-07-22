@@ -31,6 +31,9 @@ constexpr uint8_t S_WTX = 0x03; // wait-time extension request/response
 // returns immediately, so a normal answer still exits after a couple of passes.
 constexpr int POLL_ATTEMPTS = 400;
 constexpr uint32_t POLL_INTERVAL_MS = 10;
+
+// How many wait-time extensions to grant before declaring the chip stuck.
+constexpr int MAX_WTX_GRANTS = 20;
 } // namespace
 
 // CRC-16 as T1oI2C uses it: reflected polynomial 0x8408, init and xorout 0xFFFF,
@@ -164,7 +167,16 @@ int SE050::transceive(const uint8_t *apdu, size_t apduLen, uint8_t *resp, size_t
         return -1;
 
     // WTX: the SE050 asks for more time (S-block request). Grant it and re-read.
-    while (n >= 2 && rx[1] == (uint8_t)(PCB_S_REQ | S_WTX)) {
+    //
+    // Bounded, because a chip that keeps asking would otherwise spin here forever,
+    // and xfer feeds the watchdog on every pass - so the board would hang silently
+    // rather than reset. Each grant already allows a full poll window, so twenty of
+    // them is far more patience than any real operation needs.
+    for (int grants = 0; n >= 2 && rx[1] == (uint8_t)(PCB_S_REQ | S_WTX); grants++) {
+        if (grants >= MAX_WTX_GRANTS) {
+            LOG_ERROR("SE050: chip kept asking for more time, giving up");
+            return -1;
+        }
         uint8_t wtx = rx[2] >= 1 ? rx[3] : 1;
         uint8_t w[6] = {NAD_HOST_TO_SE, (uint8_t)(PCB_S_RSP | S_WTX), 0x01, wtx, 0, 0};
         uint16_t wc = crc(w, 4);
@@ -633,6 +645,10 @@ bool SE050::identitySession()
         LOG_ERROR("SE050: identity needs an open secure channel");
         return false;
     }
+    // A session opened earlier is still good: nothing closes it, and asking the
+    // chip for a second one while the first is live is not a request it expects.
+    if (sessionActive)
+        return true;
 
     uint8_t authId[4];
     be32(AUTH_OBJ, authId);
@@ -686,6 +702,7 @@ bool SE050::identitySession()
             return false;
         }
     }
+    sessionActive = true;
     return true;
 }
 

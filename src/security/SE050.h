@@ -129,6 +129,9 @@ class SE050
     Scp03 scp = {};
     uint8_t sessionId[8] = {};
     bool identityReady = false;
+    // A UserID session, once opened, stays open for the run. Tracked so the second
+    // caller reuses it instead of asking the chip to open another one.
+    bool sessionActive = false;
     // Which key object identityEcdh works against: the chip-generated identity or
     // the mirrored node key, depending on which path prepared it.
     uint32_t activeKeyObj = 0;
