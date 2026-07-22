@@ -80,6 +80,14 @@ class SE050
     // (3 + LEN + 2), or 0 if nothing valid came back.
     size_t xfer(const uint8_t *tx, size_t txLen, uint8_t *rx, size_t rxCap);
 
+    // True while xfer is parked waiting for the chip - the only point in a
+    // transaction where control can leave the driver. Anything that would start
+    // fresh work on the chip from there is a re-entrant call and gets refused:
+    // it would advance the SCP03 counter out from under the transaction in
+    // flight and overwrite the buffers it is still using.
+    bool waiting = false;
+    bool reentered(const char *what);
+
     bool selectApplet();
 
     // Curve, authenticator and UserID session - the idempotent preamble both
@@ -122,6 +130,28 @@ class SE050
     void cryptogram(uint8_t constant, const uint8_t context[16], uint8_t out[8]);
     void chainedCmac(const uint8_t *cmd, size_t len, uint8_t mac[8]);
     bool initializeUpdate(const uint8_t hostChallenge[8], uint8_t cardChallenge[8], uint8_t cardCryptogram[8]);
+
+    // Transaction buffers, held in the object rather than on the stack.
+    //
+    // One key agreement nests identityEcdh -> sessionApdu -> secureApdu ->
+    // transceive -> xfer, and as locals these came to roughly 2.5 KB in a
+    // single call chain entered from deep inside packet handling. That is what
+    // rebooted the board on every real PKI message while the same code passed
+    // a self-test from setup(), where the frame underneath it is shallow.
+    // Moving them here costs ~2.2 KB of a RAM budget that is 18% used and takes
+    // the chain down to a few hundred bytes of stack.
+    //
+    // Sharing one set of buffers across the nesting is safe because the levels
+    // use different ones and reentered() refuses any overlapping transaction.
+    uint8_t txFrame[288];  // block written to the chip
+    uint8_t rxFrame[288];  // block read back
+    uint8_t apduOut[300];  // wrapped command built by secureApdu
+    uint8_t apduIn[300];   // its response
+    uint8_t encBuf[256];   // C-DATA after encryption
+    uint8_t padBuf[256];   // C-DATA before it, padded
+    uint8_t macBuf[274];   // MCV || response || SW, the R-MAC input
+    uint8_t plainBuf[256]; // decrypted response
+    uint8_t sessionBuf[288];
 
     TwoWire &bus;
     uint8_t address;

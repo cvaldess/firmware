@@ -12,9 +12,16 @@ SE050 *se050 = nullptr;
 
 #ifdef ARCH_RP2040
 #include <hardware/watchdog.h>
+#include <pico/time.h>
 #define SE050_FEED_WATCHDOG() watchdog_update()
+// A hardware busy-wait, not delay(). delay() runs the framework's yield hook,
+// which hands control to whatever else is pending - in the middle of a
+// transaction, that is exactly what must not happen. The wait is short and the
+// watchdog is fed explicitly around it.
+#define SE050_WAIT_MS(ms) busy_wait_us_32((ms) * 1000u)
 #else
 #define SE050_FEED_WATCHDOG() ((void)0)
+#define SE050_WAIT_MS(ms) delay(ms)
 #endif
 
 namespace
@@ -50,6 +57,18 @@ uint16_t SE050::crc(const uint8_t *data, size_t len)
     return (uint16_t)(((cal & 0xFF) << 8) | ((cal >> 8) & 0xFF));
 }
 
+// Whether a call arrived while a transaction is parked mid-flight. Refusing is
+// the only safe answer: the caller would share buffers and an SCP03 counter with
+// work that has not finished, and the chip would see two interleaved commands on
+// one channel.
+bool SE050::reentered(const char *what)
+{
+    if (!waiting)
+        return false;
+    LOG_ERROR("SE050: %s re-entered while a transaction is in flight, refusing", what);
+    return true;
+}
+
 size_t SE050::xfer(const uint8_t *tx, size_t txLen, uint8_t *rx, size_t rxCap)
 {
     if (rxCap < 3)
@@ -67,8 +86,9 @@ size_t SE050::xfer(const uint8_t *tx, size_t txLen, uint8_t *rx, size_t rxCap)
     // header announced. A single large fixed read does not survive a slow answer.
     uint8_t header[3];
     bool haveHeader = false;
+    waiting = true;
     for (int attempt = 0; attempt < POLL_ATTEMPTS && !haveHeader; attempt++) {
-        delay(POLL_INTERVAL_MS);
+        SE050_WAIT_MS(POLL_INTERVAL_MS);
         SE050_FEED_WATCHDOG(); // this loop can run for seconds
         if (bus.requestFrom(address, (uint8_t)sizeof(header)) == sizeof(header)) {
             for (size_t i = 0; i < sizeof(header); i++)
@@ -76,6 +96,7 @@ size_t SE050::xfer(const uint8_t *tx, size_t txLen, uint8_t *rx, size_t rxCap)
             haveHeader = (header[0] == NAD_SE_TO_HOST);
         }
     }
+    waiting = false;
     if (!haveHeader)
         return 0;
 
@@ -148,8 +169,11 @@ uint16_t SE050::statusWord(const uint8_t *resp, int len)
 
 int SE050::transceive(const uint8_t *apdu, size_t apduLen, uint8_t *resp, size_t respCap)
 {
-    uint8_t frame[288];
-    if (5 + apduLen > sizeof(frame))
+    if (reentered("transceive"))
+        return -1;
+
+    uint8_t *const frame = txFrame;
+    if (5 + apduLen > sizeof(txFrame))
         return -1;
 
     frame[0] = NAD_HOST_TO_SE;
@@ -160,8 +184,8 @@ int SE050::transceive(const uint8_t *apdu, size_t apduLen, uint8_t *resp, size_t
     frame[3 + apduLen] = (c >> 8) & 0xFF;
     frame[4 + apduLen] = c & 0xFF;
 
-    uint8_t rx[288];
-    size_t n = xfer(frame, 5 + apduLen, rx, sizeof(rx));
+    uint8_t *const rx = rxFrame;
+    size_t n = xfer(frame, 5 + apduLen, rx, sizeof(rxFrame));
     seq ^= 1;
     if (n == 0)
         return -1;
@@ -182,7 +206,7 @@ int SE050::transceive(const uint8_t *apdu, size_t apduLen, uint8_t *resp, size_t
         uint16_t wc = crc(w, 4);
         w[4] = (wc >> 8) & 0xFF;
         w[5] = wc & 0xFF;
-        n = xfer(w, sizeof(w), rx, sizeof(rx));
+        n = xfer(w, sizeof(w), rx, sizeof(rxFrame));
         if (n == 0)
             return -1;
     }
@@ -458,18 +482,18 @@ void SE050::encryptionIcv(bool response, uint8_t icv[16])
 int SE050::secureApdu(const uint8_t header[4], const uint8_t *data, int dataLen, bool expectResponse, uint8_t *resp,
                       int respCap, uint16_t *sw)
 {
-    if (!scp.open) {
+    if (!scp.open || reentered("secureApdu")) {
         *sw = 0xFFFF;
         return -1;
     }
 
     scp.counter++;
 
-    uint8_t enc[256];
+    uint8_t *const enc = encBuf;
     int encLen = 0;
     if (dataLen > 0) {
-        uint8_t padded[256];
-        if ((size_t)dataLen + 16 > sizeof(padded)) {
+        uint8_t *const padded = padBuf;
+        if ((size_t)dataLen + 16 > sizeof(padBuf)) {
             *sw = 0xFFFF;
             return -1;
         }
@@ -482,7 +506,7 @@ int SE050::secureApdu(const uint8_t header[4], const uint8_t *data, int dataLen,
         cbc(scp.senc, icv, padded, encLen, enc, true);
     }
 
-    uint8_t out[300];
+    uint8_t *const out = apduOut;
     int p = 0;
     out[p++] = (uint8_t)(header[0] | 0x04); // CLA carries the security bit
     out[p++] = header[1];
@@ -499,8 +523,8 @@ int SE050::secureApdu(const uint8_t header[4], const uint8_t *data, int dataLen,
     if (expectResponse)
         out[p++] = 0x00;
 
-    uint8_t r[300];
-    int n = transceive(out, p, r, sizeof(r));
+    uint8_t *const r = apduIn;
+    int n = transceive(out, p, r, sizeof(apduIn));
     if (n < 0) {
         *sw = 0xFFFF;
         return -1;
@@ -515,7 +539,11 @@ int SE050::secureApdu(const uint8_t header[4], const uint8_t *data, int dataLen,
     *sw = (uint16_t)((r[n - 2] << 8) | r[n - 1]);
 
     int encRespLen = n - 10;
-    uint8_t buf[16 + 256 + 2];
+    uint8_t *const buf = macBuf;
+    if ((size_t)(16 + encRespLen + 2) > sizeof(macBuf)) {
+        LOG_ERROR("SE050: response of %d bytes is too long to verify", encRespLen);
+        return -1;
+    }
     memcpy(buf, scp.mcv, 16); // R-MAC reads the MCV but must not advance it
     memcpy(&buf[16], r, encRespLen);
     buf[16 + encRespLen] = r[n - 2];
@@ -531,7 +559,9 @@ int SE050::secureApdu(const uint8_t header[4], const uint8_t *data, int dataLen,
 
     uint8_t icv[16];
     encryptionIcv(true, icv);
-    uint8_t plain[256];
+    uint8_t *const plain = plainBuf;
+    if ((size_t)encRespLen > sizeof(plainBuf))
+        return -1;
     cbc(scp.senc, icv, r, encRespLen, plain, false);
 
     int len = encRespLen; // strip the 80 00 .. padding
@@ -548,10 +578,19 @@ int SE050::secureApdu(const uint8_t header[4], const uint8_t *data, int dataLen,
 int SE050::sessionApdu(const uint8_t header[4], const uint8_t *data, int dataLen, bool expectResponse, uint8_t *resp,
                        int respCap, uint16_t *sw)
 {
-    uint8_t od[288];
+    if (reentered("sessionApdu")) {
+        *sw = 0xFFFF;
+        return -1;
+    }
+
+    uint8_t *const od = sessionBuf;
     int j = 0;
     int innerLc = (dataLen == 0) ? 0 : ((dataLen < 0xFF && !expectResponse) ? 1 : 3);
     int tagLen = 4 + innerLc + dataLen;
+    if ((size_t)(14 + tagLen) > sizeof(sessionBuf)) { // session id TLV, TAG_1 header, inner command
+        *sw = 0xFFFF;
+        return -1;
+    }
 
     od[j++] = 0x10; // TAG_SESSION_ID
     od[j++] = 0x08;
@@ -868,7 +907,7 @@ bool SE050::identityImport(const uint8_t privateKey[32], uint8_t publicKeyOut[32
 
 bool SE050::identityEcdh(const uint8_t peerPublic[32], uint8_t shared[32])
 {
-    if (!identityReady)
+    if (!identityReady || reentered("identityEcdh"))
         return false;
 
     uint8_t keyId[4];

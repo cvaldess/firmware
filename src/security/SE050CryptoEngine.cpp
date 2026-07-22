@@ -6,6 +6,7 @@
 #include "mesh/CryptoEngine.h"
 #include "meshUtils.h"
 #include <Curve25519.h>
+#include <stdint.h>
 
 // Runs Meshtastic's PKI key agreement inside the SE050 instead of in software.
 //
@@ -16,6 +17,32 @@
 // of an identity that thirty-odd call sites still assume is exportable.
 //
 // Measured cost is ~64ms per agreement against ~27ms for the bundled Curve25519.
+
+#ifdef ARCH_RP2040
+// Where the key agreement runs, reported the first time and whenever it gets
+// deeper, so the number lands in syslog on a live node.
+//
+// Only the address, deliberately. The obvious version of this subtracted
+// __StackBottom to print the headroom, and came back with 4294541880 - a
+// negative number - which says the frame sits some 400 KB below the linker's
+// core 0 stack in SCRATCH_Y. So this code does not run on that stack at all,
+// and any "bytes left" computed against it would be fiction. Finding out which
+// stack it does run on, and how big it is, is the open question; until then the
+// raw address is the honest thing to log, and comparing two of them still shows
+// the depth this path reaches.
+static void reportStackDepth()
+{
+    uintptr_t frame = (uintptr_t)__builtin_frame_address(0);
+    static uintptr_t low = UINTPTR_MAX;
+    if (frame < low) {
+        low = frame;
+        LOG_INFO("SE050: key agreement frame at 0x%08x, deepest so far", (unsigned)frame);
+    }
+}
+#else
+static void reportStackDepth() {}
+#endif
+
 class SE050CryptoEngine : public CryptoEngine
 {
   public:
@@ -23,6 +50,7 @@ class SE050CryptoEngine : public CryptoEngine
     // route through it, so this single override captures the whole ECDH path.
     virtual bool setDHPublicKey(uint8_t *pubKey) override
     {
+        reportStackDepth();
         if (!mirrorReady())
             return CryptoEngine::setDHPublicKey(pubKey);
 
