@@ -834,6 +834,10 @@ bool SE050::probe()
         return true;
     }
 
+    // dh2 destroys the private key it is given, so keep a copy for the benchmark.
+    uint8_t benchPrivate[32];
+    memcpy(benchPrivate, testPrivate, 32);
+
     uint8_t sharedSoft[32];
     memcpy(sharedSoft, ourPublic, 32);
     if (!Curve25519::dh2(sharedSoft, testPrivate)) {
@@ -851,6 +855,38 @@ bool SE050::probe()
             snprintf(&hex[i * 2], 3, "%02X", sharedSoft[i]);
         LOG_ERROR("SE050: ECDH MISMATCH, soft=%s", hex);
     }
+
+    // What one key agreement costs. Meshtastic runs a full ECDH per PKI packet, so
+    // this number, not correctness, decides whether the chip can back the radio path.
+    // Each round is a UserID session nested inside SCP03, which means AES-CMAC plus
+    // AES-CBC over both the command and the response, all over I2C at 100 kHz.
+    constexpr int ROUNDS = 5;
+    uint32_t best = UINT32_MAX, worst = 0, total = 0;
+    int done = 0;
+    for (int i = 0; i < ROUNDS; i++) {
+        uint8_t tmp[32];
+        uint32_t t0 = micros();
+        bool ok = identityEcdh(testPublic, tmp);
+        uint32_t dt = micros() - t0;
+        if (!ok) {
+            LOG_WARN("SE050: ECDH timing aborted, round %d failed", i + 1);
+            break;
+        }
+        total += dt;
+        best = min(best, dt);
+        worst = max(worst, dt);
+        done++;
+    }
+
+    uint8_t softShared[32];
+    memcpy(softShared, ourPublic, 32);
+    uint32_t t0 = micros();
+    Curve25519::dh2(softShared, benchPrivate);
+    uint32_t softUs = micros() - t0;
+
+    if (done > 0)
+        LOG_INFO("SE050: ECDH cost over %d rounds: min %u ms, avg %u ms, max %u ms | software %u ms (%ux)", done, best / 1000,
+                 (total / done) / 1000, worst / 1000, softUs / 1000, softUs ? (total / done) / softUs : 0);
 
     return true;
 }
