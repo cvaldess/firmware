@@ -922,36 +922,25 @@ void ScanI2CTwoWire::scanPort(I2CPort port, uint8_t *address, uint8_t asize)
                 break;
 
             case 0x48: {
-                // SE050 probe: a T=1oI2C soft reset (S-block) - NAD=0x5A PCB=0xC0 LEN=0x00
-                // plus CRC - which the chip answers with A5 E0 00 3F 19.
-                //
-                // The answer must be fetched with requestFrom(). readBytes() alone only
-                // drains the Wire RX buffer, and requestFrom() is what fills it, so
-                // without it the read returns 0 bytes after burning Stream's 1s timeout
-                // and every SE050 falls through to the FT6336U branch below.
+                // T=1oI2C soft reset; an SE050 answers A5 E0 00 3F 19. requestFrom() is
+                // required: readBytes() only drains the RX buffer requestFrom() fills.
                 const uint8_t getInfo[] = {0x5A, 0xC0, 0x00, 0xFF, 0xFC};
                 const uint8_t expectedInfo[] = {0xA5, 0xE0, 0x00, 0x3F, 0x19};
                 uint8_t info[sizeof(expectedInfo)] = {0};
-                size_t lastLen = 0;
+                size_t len = 0;
                 bool isSE050 = false;
 
                 i2cBus->beginTransmission(addr.address);
                 i2cBus->write(getInfo, sizeof(getInfo));
                 if (i2cBus->endTransmission() == 0) {
                     delay(2); // guard time before the answer can be read back
-                    lastLen = i2cBus->requestFrom((uint8_t)addr.address, (uint8_t)sizeof(info));
-                    if (lastLen == sizeof(info)) {
+                    len = i2cBus->requestFrom((uint8_t)addr.address, (uint8_t)sizeof(info));
+                    if (len == sizeof(info)) {
                         for (size_t i = 0; i < sizeof(info); i++)
                             info[i] = i2cBus->read();
                         isSE050 = (memcmp(expectedInfo, info, sizeof(info)) == 0);
                     }
                 }
-
-                // Distinguishes "nothing came back" from "something answered, but not an
-                // SE050" - the two need very different follow-up.
-                if (!isSE050)
-                    LOG_DEBUG("0x48 not an SE050: got %u bytes %02x %02x %02x %02x %02x", (unsigned)lastLen, info[0], info[1],
-                              info[2], info[3], info[4]);
 
                 if (isSE050) {
                     LOG_INFO("NXP SE050 crypto chip found");
