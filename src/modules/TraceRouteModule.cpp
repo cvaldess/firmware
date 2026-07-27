@@ -129,8 +129,31 @@ bool TraceRouteModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, m
     return false; // let it be handled by RoutingModule
 }
 
+#ifdef TRACEROUTE_DUMP
+// Temporary: dump the raw payload of every traceroute the moment we start processing it,
+// so a syslog-carried record survives even if processing this one resets the board. The
+// mesh is flooded with traceroutes (~750/day/node) and one of them crashes the firmware;
+// this catches the exact bytes that arrive just before a reset.
+static void dumpTraceroutePayload(const meshtastic_MeshPacket &p, const meshtastic_RouteDiscovery *r)
+{
+    size_t n = p.decoded.payload.size;
+    if (n > 120)
+        n = 120;
+    char hex[2 * 120 + 1];
+    for (size_t i = 0; i < n; i++)
+        snprintf(hex + 2 * i, 3, "%02x", p.decoded.payload.bytes[i]);
+    hex[2 * n] = '\0';
+    LOG_INFO("TRDUMP from=0x%08x to=0x%08x id=0x%08x len=%u rc=%u snrt=%u rbc=%u snrb=%u hex=%s", (unsigned)p.from,
+             (unsigned)p.to, (unsigned)p.id, (unsigned)p.decoded.payload.size, (unsigned)r->route_count,
+             (unsigned)r->snr_towards_count, (unsigned)r->route_back_count, (unsigned)r->snr_back_count, hex);
+}
+#endif
+
 void TraceRouteModule::alterReceivedProtobuf(meshtastic_MeshPacket &p, meshtastic_RouteDiscovery *r)
 {
+#ifdef TRACEROUTE_DUMP
+    dumpTraceroutePayload(p, r);
+#endif
     const meshtastic_Data &incoming = p.decoded;
 
     // Update next-hops using returned route

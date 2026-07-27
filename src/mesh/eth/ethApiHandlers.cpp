@@ -385,11 +385,17 @@ void handleApiClient(IStreamReadWrite &client)
             return;
         requestsServed++;
 #ifdef ARCH_RP2040
-        // yield() ONLY cedes to the OSThread scheduler; it does not call
-        // rp2040Loop() where watchdog_update() lives. While we sit inside
-        // serveClient() looping over keep-alive requests, main loop() is
-        // not running and the 8 s hardware watchdog WILL fire. Pet it
-        // explicitly here.
+        // yield() here is arduino-pico's raw taskYIELD() - it does NOT run the
+        // OSThread scheduler (mainController is a plain ArduinoThread object,
+        // only ever pumped from the top-level loop() in main.cpp, which we
+        // never return to for the duration of this keep-alive session). So
+        // MQTT/LoRa RX/NTP are genuinely paused until this loop exits or hits
+        // MAX_REQUESTS_PER_SESSION - bounded, but real (e.g. a LoRa packet
+        // arriving mid-session can be lost: the radio chip's RX FIFO holds
+        // only one packet, and nothing drains it while we're in here). What
+        // actually matters below is the explicit watchdog_update(): the 8 s
+        // hardware watchdog is normally pet by main loop(), which isn't
+        // running either, and WILL fire without this.
         watchdog_update();
 #endif
         yield();

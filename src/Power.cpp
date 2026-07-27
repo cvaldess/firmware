@@ -26,6 +26,17 @@
 #include "power/PowerHAL.h"
 #include "power/SGM41562.h"
 #include "sleep.h"
+#ifdef HEAP_WATCH
+#include <cstring>
+#include "memory/MemAudit.h"
+// Temporary: defined in src/platform/rp2xx0/main-rp2xx0.cpp, hands the latest heap/pool
+// sample to FAULT_CAPTURE so a future fault carries a snapshot from just before it died.
+extern void heapWatchUpdate(uint32_t freeHeap, uint32_t pktPoolBytes);
+#endif
+#if defined(STACK_WATCH) && defined(__FREERTOS)
+#include <FreeRTOS.h>
+#include <task.h>
+#endif
 #ifdef ARCH_ESP32
 // #include <driver/adc.h>
 #include <esp_adc/adc_cali.h>
@@ -1027,6 +1038,43 @@ void Power::readPowerStatus()
                  memGet.getFreeHeap() - lastheap, running, concurrency::mainController.size(false));
         lastheap = memGet.getFreeHeap();
     }
+#endif
+#ifdef HEAP_WATCH
+    // Temporary: periodic heap/packetPool telemetry, independent of DEBUG_HEAP (which fires on
+    // every free-heap delta and would be far too noisy for an overnight capture). Every 5 min,
+    // log a single grep-able line and hand the latest sample to main-rp2xx0.cpp's fault capture
+    // so a future crash carries a heap/pool snapshot from just before it died.
+    static uint32_t lastHeapWatchLog = 0;
+    if (!Throttle::isWithinTimespanMs(lastHeapWatchLog, 5 * 60 * 1000)) {
+        memaudit::logBreakdown("periodic");
+        memaudit::Tag rows[memaudit::kMaxTags];
+        size_t n = memaudit::snapshot(rows, memaudit::kMaxTags);
+        uint32_t pktPoolBytes = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (strcmp(rows[i].tag, "pktpool(live)") == 0) {
+                pktPoolBytes = (uint32_t)rows[i].bytes;
+                break;
+            }
+        }
+        LOG_INFO("HEAPWATCH free=%u total=%u pktpool=%u", memGet.getFreeHeap(), memGet.getHeapSize(), pktPoolBytes);
+        heapWatchUpdate(memGet.getFreeHeap(), pktPoolBytes);
+        lastHeapWatchLog = millis();
+    }
+#endif
+#if defined(STACK_WATCH) && defined(__FREERTOS)
+    // Temporary: same 5-min cadence as HEAP_WATCH, tracking the low-water mark of the CORE0
+    // FreeRTOS task stack - the task setup()/loop() (and so the whole packet path: traceroute,
+    // MQTT decode, Router::perhapsEncode) runs on, per fix(se050) 8634e479a. This call is itself
+    // running inside that same task, so uxTaskGetStackHighWaterMark(nullptr) reports its margin.
+    // It's a *minimum-ever* mark, not an instantaneous one, so a single sample after hours of
+    // uptime already reflects the deepest dip any traceroute/MQTT burst caused, even if that dip
+    // was momentary and long past.
+    static uint32_t lastStackWatchLog = 0;
+    if (!Throttle::isWithinTimespanMs(lastStackWatchLog, 5 * 60 * 1000)) {
+        LOG_INFO("STACKWATCH core0_min_free=%u", (unsigned)(uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)));
+        lastStackWatchLog = millis();
+    }
+#endif
 #ifdef DEBUG_HEAP_MQTT
     if (mqtt) {
         // send MQTT-Packet with Heap-Size
@@ -1050,8 +1098,6 @@ void Power::readPowerStatus()
         snprintf(wifiString, sizeof(wifiString), "%d", wifiRSSI);
         mqtt->pubSub.publish(wifiTopic, wifiString, false);
     }
-#endif
-
 #endif
 
     // If we have a battery at all and it is less than 0%, force deep sleep if we

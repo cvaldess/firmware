@@ -8,6 +8,126 @@
 #include <pico/stdlib.h>
 #include <pico/unique_id.h>
 
+#if defined(FAULT_CAPTURE) && defined(__FREERTOS)
+#include <FreeRTOS.h>
+#include <task.h>
+#endif
+
+#ifdef HEAP_WATCH
+// Temporary: last known free-heap / live packetPool-bytes snapshot, updated periodically
+// from Power.cpp (see HEAP_WATCH block there). Plain globals (not heap) so they're safe to
+// read from the fault ISR below without touching malloc/memaudit state that may itself be
+// the thing that's corrupted.
+volatile uint32_t heapWatchLastFreeHeap = 0;
+volatile uint32_t heapWatchLastPktPoolBytes = 0;
+
+void heapWatchUpdate(uint32_t freeHeap, uint32_t pktPoolBytes)
+{
+    heapWatchLastFreeHeap = freeHeap;
+    heapWatchLastPktPoolBytes = pktPoolBytes;
+}
+#endif
+
+#ifdef FAULT_CAPTURE
+// Temporary: catch a hard fault, stash the faulting PC/LR/CFSR in the watchdog scratch
+// registers (they survive the reset that follows), and report them once syslog is up on
+// the next boot. This is how we pin the traceroute crash to an exact instruction.
+#define FAULT_MAGIC 0xFA017CAFu
+
+extern "C" void faultCaptureHandler(uint32_t *stacked)
+{
+    volatile uint32_t *const cfsr = (uint32_t *)0xE000ED28;
+    watchdog_hw->scratch[0] = FAULT_MAGIC;
+    watchdog_hw->scratch[1] = stacked[6]; // stacked PC
+    watchdog_hw->scratch[2] = stacked[5]; // stacked LR
+    watchdog_hw->scratch[3] = *cfsr;      // configurable fault status
+#ifdef HEAP_WATCH
+    // Last periodic sample, not live at the instant of the fault - good enough to tell a
+    // starved pool/heap from a healthy one without calling into (possibly corrupted) malloc.
+    watchdog_hw->scratch[4] = heapWatchLastFreeHeap;
+    watchdog_hw->scratch[5] = heapWatchLastPktPoolBytes;
+#endif
+    watchdog_reboot(0, 0, 0);
+    while (true) {
+    }
+}
+
+#ifdef __FREERTOS
+// All rp2350 targets build with -D__FREERTOS=1: setup()/loop() - and so the whole packet path,
+// traceroute+MQTT included - run inside the "CORE0" task on a 4 KB stack (freertos-main.cpp,
+// xTaskCreate(__core0, "CORE0", 1024, ...)), the same task fix(se050) 8634e479a found tight via
+// a completely different path. FreeRTOS is built with configCHECK_FOR_STACK_OVERFLOW=2, so an
+// overflow there is *detected*, not silent corruption - but arduino-pico's default
+// vApplicationStackOverflowHook (weak) just calls panic("Stack overflow"), which prints to
+// whatever stdout is wired to (USB serial, not syslog) and then spins in _exit(1) - never
+// through isr_hardfault, so FAULT_CAPTURE above has been completely blind to this failure mode.
+// Overriding the weak hook here catches it the same way: stash a marker (distinct from
+// FAULT_MAGIC) across the reset and let reportFaultCrumb() report it once syslog is back up.
+#define STACK_OVERFLOW_MAGIC 0xFA017570u
+
+extern "C" void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    (void)xTask;
+    watchdog_hw->scratch[0] = STACK_OVERFLOW_MAGIC;
+    uint32_t nameWord = 0;
+    for (int i = 0; i < 4 && pcTaskName[i]; i++)
+        nameWord |= ((uint32_t)(uint8_t)pcTaskName[i]) << (i * 8);
+    watchdog_hw->scratch[1] = nameWord;
+#ifdef HEAP_WATCH
+    watchdog_hw->scratch[4] = heapWatchLastFreeHeap;
+    watchdog_hw->scratch[5] = heapWatchLastPktPoolBytes;
+#endif
+    watchdog_reboot(0, 0, 0);
+    while (true) {
+    }
+}
+#endif
+
+// Configurable faults escalate to HardFault, so this one vector catches bus/mem/usage
+// faults too. Pick the stack (MSP/PSP) the exception frame was pushed onto.
+extern "C" __attribute__((naked)) void isr_hardfault(void)
+{
+    __asm volatile("movs r0, #4      \n"
+                   "mov  r1, lr      \n"
+                   "tst  r0, r1      \n"
+                   "beq  1f          \n"
+                   "mrs  r0, psp     \n"
+                   "b    2f          \n"
+                   "1:  mrs r0, msp  \n"
+                   "2:  ldr r1, =faultCaptureHandler \n"
+                   "bx   r1          \n");
+}
+
+static void reportFaultCrumb()
+{
+    if (watchdog_hw->scratch[0] == FAULT_MAGIC) {
+        LOG_ERROR("FAULT: previous boot HARD FAULT pc=0x%08x lr=0x%08x cfsr=0x%08x", (unsigned)watchdog_hw->scratch[1],
+                  (unsigned)watchdog_hw->scratch[2], (unsigned)watchdog_hw->scratch[3]);
+#ifdef HEAP_WATCH
+        LOG_ERROR("FAULT: last HEAPWATCH sample before fault: free=%u pktpool=%u", (unsigned)watchdog_hw->scratch[4],
+                  (unsigned)watchdog_hw->scratch[5]);
+#endif
+        watchdog_hw->scratch[0] = 0;
+        return;
+    }
+#ifdef __FREERTOS
+    if (watchdog_hw->scratch[0] == STACK_OVERFLOW_MAGIC) {
+        char name[5] = {0};
+        uint32_t w = watchdog_hw->scratch[1];
+        for (int i = 0; i < 4; i++)
+            name[i] = (char)((w >> (i * 8)) & 0xFF);
+        LOG_ERROR("FAULT: previous boot STACK OVERFLOW task='%s'", name);
+#ifdef HEAP_WATCH
+        LOG_ERROR("FAULT: last HEAPWATCH sample before fault: free=%u pktpool=%u", (unsigned)watchdog_hw->scratch[4],
+                  (unsigned)watchdog_hw->scratch[5]);
+#endif
+        watchdog_hw->scratch[0] = 0;
+        return;
+    }
+#endif
+}
+#endif
+
 #ifdef __PLAT_RP2040__
 #include <pico/sleep.h>
 
@@ -151,6 +271,15 @@ void rp2040Loop()
         watchdog_running = true;
     }
     watchdog_update();
+
+#ifdef FAULT_CAPTURE
+    // Report the previous boot's fault once, after syslog is up (~15s).
+    static bool faultReported = false;
+    if (!faultReported && millis() > 15000) {
+        faultReported = true;
+        reportFaultCrumb();
+    }
+#endif
 }
 
 void enterDfuMode()
