@@ -981,7 +981,10 @@ size_t PhoneAPI::getFromRadio(uint8_t *buf)
     case STATE_SEND_FILEMANIFEST: {
         LOG_DEBUG("FromRadio=STATE_SEND_FILEMANIFEST");
         // ONLY_NODES variants skip the manifest.
-        if (config_state == filesManifest.size() || config_nonce == SPECIAL_NONCE_ONLY_NODES) {
+        // >= not ==: the manifest is released from close() and rebuilt by handleStartConfig,
+        // so config_state can outlive the vector it indexes. at() is bounds-checked and this
+        // build has -fno-exceptions, which turns one overshoot into a silent board reset.
+        if (config_state >= filesManifest.size() || config_nonce == SPECIAL_NONCE_ONLY_NODES) {
             config_state = 0;
             releaseFilesManifest(filesManifest);
             // Skip to complete packet

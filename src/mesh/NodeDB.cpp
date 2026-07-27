@@ -3055,9 +3055,19 @@ bool NodeDB::saveToDisk(int saveWhat)
 
 const meshtastic_NodeInfoLite *NodeDB::readNextMeshNode(uint32_t &readIndex)
 {
-    if (readIndex < numMeshNodes)
+    // numMeshNodes is the logical count and meshNodes->size() the backing store; they
+    // are normally equal, but this walk runs across many seconds of an API replay while
+    // incoming traffic evicts and appends underneath it. at() is bounds-checked and the
+    // build has -fno-exceptions, so a single index past the end aborts the whole board
+    // with no message. Check the store too and stop the walk instead.
+    if (readIndex < numMeshNodes) {
+        if (readIndex >= meshNodes->size()) {
+            LOG_ERROR("NodeDB walk out of range: readIndex %u, numMeshNodes %d, store %u", (unsigned)readIndex, numMeshNodes,
+                      (unsigned)meshNodes->size());
+            return NULL;
+        }
         return &meshNodes->at(readIndex++);
-    else
+    } else
         return NULL;
 }
 
@@ -3899,8 +3909,15 @@ meshtastic_NodeInfoLite *NodeDB::getOrCreateMeshNode(NodeNum n)
                                  evicted.role, warmProtectedCategory(evicted), nodeInfoLiteHasXeddsaSigned(&evicted));
 #endif
                 eraseNodeSatellites(evicted.num);
-                // Shove the remaining nodes down the chain
-                for (int i = oldestIndex; i < numMeshNodes - 1; i++) {
+                // Shove the remaining nodes down the chain. Bound by the backing store as
+                // well as the logical count: at() aborts the board outright (-fno-exceptions)
+                // if numMeshNodes ever runs ahead of the vector.
+                int shiftEnd = numMeshNodes - 1;
+                if (static_cast<size_t>(numMeshNodes) > meshNodes->size()) {
+                    LOG_ERROR("NodeDB evict out of range: numMeshNodes %d, store %u", numMeshNodes, (unsigned)meshNodes->size());
+                    shiftEnd = static_cast<int>(meshNodes->size()) - 1;
+                }
+                for (int i = oldestIndex; i < shiftEnd; i++) {
                     meshNodes->at(i) = meshNodes->at(i + 1);
                 }
                 (numMeshNodes)--;
