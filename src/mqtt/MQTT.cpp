@@ -143,6 +143,10 @@ inline void onReceiveProto(char *topic, byte *payload, size_t length)
     }
 
     UniquePacketPoolPacket p = packetPool.allocUniqueZeroed();
+    if (!p) {
+        LOG_WARN("Failed to allocate packet for MQTT downlink, dropping");
+        return;
+    }
     p->from = e.packet->from;
     p->to = e.packet->to;
     p->id = e.packet->id;

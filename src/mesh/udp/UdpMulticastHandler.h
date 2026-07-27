@@ -84,6 +84,10 @@ class UdpMulticastHandler final
             // PKI DMs), so it must be copied verbatim for the router to attempt PKI/channel decryption. Keep
             // pki_encrypted/public_key too so downstream auth/metadata can reflect PKI usage correctly.
             UniquePacketPoolPacket p = packetPool.allocUniqueCopy(mp);
+            if (!p) {
+                LOG_WARN("Failed to allocate packet for UDP multicast RX, dropping");
+                return;
+            }
             // Unset received SNR/RSSI
             p->rx_snr = 0;
             p->rx_rssi = 0;
