@@ -316,17 +316,25 @@ void handleApiClient(IStreamReadWrite &client)
     // RP2350 hardware watchdog (8 s default in arduino-pico) only gets
     // pet by the main loop. A client.meshtastic.org sync produces ~80
     // back-to-back requests over a single TLS session - well past the
-    // watchdog deadline. yield() between requests lets the rest of core0
-    // (Periodic ticks, NTP, MQTT, LoRa packet pump) run + pets the
-    // watchdog; the cap puts a hard ceiling so a chatty client can never
+    // watchdog deadline. yield() does NOT help here on RP2350: it is a raw taskYIELD(), and
+    // the OSThread scheduler and the watchdog pet both live in loop(),
+    // which we do not return to; the caps are what bound this, so a chatty client can never
     // monopolize the server indefinitely. After the cap the client just
     // re-handshakes once and continues, which is cheap (one ECDSA cost
     // every 64 requests is amortized well below the per-request
     // handshake we had before keep-alive).
     static constexpr int MAX_REQUESTS_PER_SESSION = 64;
+    // The request cap alone is not a watchdog bound: parseRequest() allows HEADER_TIMEOUT_MS
+    // (3 s) per request, so three slow ones in a row already exceed the 8 s hardware watchdog
+    // without ever returning to loop(). Observed on 192.168.1.161: a browser polling
+    // /api/v1/fromradio reboot-looped the board, and the reboots stopped dead whenever the
+    // client was closed. Cap the wall clock too, so the session always hands control back
+    // with room to spare; the client just re-handshakes and continues.
+    static constexpr uint32_t MAX_SESSION_MS = 3000;
 
+    const uint32_t sessionStart = millis();
     int requestsServed = 0;
-    while (client.connected() && requestsServed < MAX_REQUESTS_PER_SESSION) {
+    while (client.connected() && requestsServed < MAX_REQUESTS_PER_SESSION && (millis() - sessionStart) < MAX_SESSION_MS) {
         const uint32_t deadline = millis() + HEADER_TIMEOUT_MS;
         Request req;
         if (!parseRequest(client, req, deadline)) {
