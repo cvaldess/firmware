@@ -17,6 +17,7 @@
 #include <mbedtls/error.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/ssl.h>
+#include <mbedtls/ssl_cache.h>
 #include <mbedtls/x509_crt.h>
 
 #include <hardware/watchdog.h>
@@ -60,6 +61,22 @@ static mbedtls_pk_context pkKey;
 static mbedtls_ssl_config sslConf;
 static mbedtls_ssl_context ssl;
 static bool tlsReady = false;
+
+// Session-ID cache, so a returning client resumes instead of redoing the full
+// handshake. A fresh ECDHE-ECDSA P-256 handshake measures 508 ms on this M33
+// (no crypto accelerator), and the web client reconnects roughly every 11
+// requests: ~100 handshakes per 10 minutes, i.e. 8.5% of wall time spent inside
+// half-second blocking chunks. That does not trip the watchdog (the handshake
+// loop below feeds it), but it runs inside loop(), so every OSThread starves
+// behind it - measurable as the 60s battery thread firing up to 70s late, and
+// visible from across the room as the status LED blinking slow whenever a
+// browser is attached. An abbreviated handshake skips the ECDHE entirely.
+//
+// 8 entries, not the mbedTLS default of 50: a browser opens up to 6 parallel
+// connections to one host, so 8 covers a client plus a straggler without
+// holding 50 sessions of heap on a board that has other plans for it.
+#define ETH_TLS_SESSION_CACHE_ENTRIES 8
+static mbedtls_ssl_cache_context sslCache;
 
 // Adapter: route mbedtls_ssl_set_bio() through the EthernetClient instance
 // that runOnce() is currently servicing. The void* ctx we hand mbedtls is a
@@ -237,6 +254,7 @@ class EthTlsApiServerThread : public concurrency::OSThread
         mbedtls_pk_init(&pkKey);
         mbedtls_ssl_config_init(&sslConf);
         mbedtls_ssl_init(&ssl);
+        mbedtls_ssl_cache_init(&sslCache);
 
         int ret;
 
@@ -274,6 +292,15 @@ class EthTlsApiServerThread : public concurrency::OSThread
             LOG_ERROR("ETH TLS: conf_own_cert failed -0x%04x", -ret);
             return false;
         }
+
+        // Entries never expire on a timer: mbedtls_ssl_cache_set_timeout() only
+        // exists under MBEDTLS_HAVE_TIME, which mbedtls_user_config.h undefines
+        // (pico-sdk mbedtls has no clock here). Eviction is therefore purely by
+        // max_entries. That is fine - the cache is dropped wholesale whenever
+        // the context is rebuilt, which is the only event that can invalidate a
+        // session anyway (see deInitEthTlsApiServer).
+        mbedtls_ssl_cache_set_max_entries(&sslCache, ETH_TLS_SESSION_CACHE_ENTRIES);
+        mbedtls_ssl_conf_session_cache(&sslConf, &sslCache, mbedtls_ssl_cache_get, mbedtls_ssl_cache_set);
 
         ret = mbedtls_ssl_setup(&ssl, &sslConf);
         if (ret != 0) {
@@ -342,6 +369,11 @@ void deInitEthTlsApiServer()
     if (tlsReady) {
         mbedtls_ssl_free(&ssl);
         mbedtls_ssl_config_free(&sslConf);
+        // Drop every cached session with the context that issued them. This path
+        // runs on a cert regeneration (new DHCP lease -> new SAN), and a client
+        // resuming against the retired cert would skip the certificate exchange
+        // that is supposed to show it the new one.
+        mbedtls_ssl_cache_free(&sslCache);
         mbedtls_pk_free(&pkKey);
         mbedtls_x509_crt_free(&certChain);
         tlsReady = false;
