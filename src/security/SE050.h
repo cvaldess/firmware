@@ -2,13 +2,13 @@
 
 // NXP SE050 secure element over T=1oI2C (UM11225).
 //
-// Layer 1 only for now: block framing (NAD PCB LEN INF CRC), the CRC-16 variant
-// the SE050 uses, and the interface reset that returns the ATR. APDUs, SCP03 and
-// the X25519 identity come on top of this and are ported separately.
-//
-// The protocol here is a port of a driver already validated on silicon against
-// an SE050E2 (applet 7.2.0); only the transport differs - ESP-IDF i2c_master
-// there, Arduino Wire here.
+// Covers the whole path this driver needs: block framing (NAD PCB LEN INF CRC)
+// and the interface reset that returns the ATR, APDU exchange over that
+// transport, a PlatformSCP03 secure channel on top of it (the SE050 refuses
+// key agreement outside an authenticated channel), and an X25519 identity that
+// either lives in the chip from the start (identityEnsure) or is imported to
+// mirror a key the caller already holds (identityImport) for ECDH
+// (identityEcdh). Validated on silicon against an SE050E2, applet 7.2.0.
 
 #include "configuration.h"
 
@@ -26,6 +26,10 @@ class SE050
     // Wire must already be begun by the caller - the I2C bus is shared, so this
     // class never configures or owns it.
     SE050(TwoWire &bus, uint8_t address = DEFAULT_ADDRESS) : bus(bus), address(address) {}
+    // Holds live SCP03 session state and ~2.2 KB of transaction buffers - copying would
+    // both blow RAM and clone a session only one instance may drive.
+    SE050(const SE050 &) = delete;
+    SE050 &operator=(const SE050 &) = delete;
 
     // Interface reset (S-block). The SE050 answers with its ATR, which also
     // resynchronises the block layer. Returns true and fills atrOut/atrLen on
@@ -111,18 +115,17 @@ class SE050
 
     // Runs one APDU inside the secure channel: encrypt and MAC the command, then
     // verify and decrypt the response. Returns the plaintext length (SW stripped).
-    int secureApdu(const uint8_t header[4], const uint8_t *data, int dataLen, bool expectResponse, uint8_t *resp,
-                   int respCap, uint16_t *sw);
+    int secureApdu(const uint8_t header[4], const uint8_t *data, int dataLen, bool expectResponse, uint8_t *resp, int respCap,
+                   uint16_t *sw);
 
     // Same, but nested inside a UserID session (ProcessSessionCmd). Key agreement
     // needs the object bound to a session authenticator; the secure channel alone
     // is only transport and is not enough.
-    int sessionApdu(const uint8_t header[4], const uint8_t *data, int dataLen, bool expectResponse, uint8_t *resp,
-                    int respCap, uint16_t *sw);
+    int sessionApdu(const uint8_t header[4], const uint8_t *data, int dataLen, bool expectResponse, uint8_t *resp, int respCap,
+                    uint16_t *sw);
 
     void encryptionIcv(bool response, uint8_t icv[16]);
-    static void cbc(const uint8_t key[16], const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out,
-                    bool encrypt);
+    static void cbc(const uint8_t key[16], const uint8_t iv[16], const uint8_t *in, size_t len, uint8_t *out, bool encrypt);
     static const uint8_t *tlv1(const uint8_t *resp, int len, int *valueLen);
     static void reverse(const uint8_t *in, uint8_t *out, size_t len);
 
