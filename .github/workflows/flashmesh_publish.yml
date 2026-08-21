@@ -41,8 +41,8 @@ jobs:
       - name: Mask secrets in logs
         run: |
           echo "::add-mask::${{ secrets.FLASHMESH_ADMIN_TOKEN }}"
-          if [ -n "${{ secrets.CLOUDFLARE_API_TOKEN }}" ]; then
-            echo "::add-mask::${{ secrets.CLOUDFLARE_API_TOKEN }}"
+          if [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ]; then
+            echo "::add-mask::${{ secrets.R2_SECRET_ACCESS_KEY }}"
           fi
           if [ -n "${{ secrets.OTA_PSK_HEX }}" ]; then
             echo "::add-mask::${{ secrets.OTA_PSK_HEX }}"
@@ -259,25 +259,34 @@ jobs:
       - name: Publish downloads to meshfiles
         if: steps.dedup.outputs.skip != 'true'
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # R2's S3 API rather than wrangler: a bucket-scoped R2 token is issued
+          # for S3 and is refused by the account-level REST path wrangler calls,
+          # which returns a bare 403 "Authentication error".
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          AWS_DEFAULT_REGION: auto
+          # Recent aws-cli versions add integrity headers by default that R2 has
+          # historically rejected; only send them when the API asks for them.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
           PIO_ENV: ${{ matrix.pio_env }}
           BIN: ${{ steps.artifacts.outputs.bin }}
           UF2: ${{ steps.artifacts.outputs.uf2 }}
         run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "::warning::CLOUDFLARE_API_TOKEN not set — skipping meshfiles publish"
+          if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$ACCOUNT_ID" ]; then
+            echo "::warning::R2 credentials not set — skipping meshfiles publish"
             exit 0
           fi
-          put() {
-            npx --yes wrangler@4 r2 object put "meshfiles/$2" \
-              --file="$1" --content-type="application/octet-stream" --remote
-            echo "::notice::meshfiles <- $2 ($(stat -c%s "$1") bytes)"
-          }
           if [ -z "$UF2" ]; then
             echo "::error::no .uf2 built for $PIO_ENV — the USB flashing download cannot be updated"
             echo "::error::the catalog upload above already succeeded; only this download is stale"
             exit 1
           fi
+          put() {
+            aws s3 cp "$1" "s3://meshfiles/$2" \
+              --endpoint-url "https://$ACCOUNT_ID.r2.cloudflarestorage.com" \
+              --content-type application/octet-stream --only-show-errors
+            echo "::notice::meshfiles <- $2 ($(stat -c%s "$1") bytes)"
+          }
           put "$BIN" "firmware-$PIO_ENV.bin"
           put "$UF2" "firmware-$PIO_ENV.uf2"
