@@ -143,9 +143,10 @@ jobs:
           BUILD_DIR=.pio/build/${{ matrix.pio_env }}
           ELF=$(ls "$BUILD_DIR"/firmware-*.elf 2>/dev/null | head -1)
           BIN=$(ls "$BUILD_DIR"/firmware-*.bin 2>/dev/null | head -1)
-          # The .uf2 is for the USB drag-and-drop download on the product pages.
-          # Deliberately not required: the catalog only needs the .bin, and a
-          # missing .uf2 must never cost a release.
+          # The .uf2 is the drag-and-drop download most people flash with, so it
+          # is required — but only by the meshfiles step at the end, never here.
+          # Failing at this point would abort before the catalog is uploaded and
+          # cost the release; failing at the end costs nothing but the download.
           UF2=$(ls "$BUILD_DIR"/firmware-*.uf2 2>/dev/null | head -1)
           if [ -z "$ELF" ] || [ -z "$BIN" ]; then
             echo "::error::artifacts missing in $BUILD_DIR (elf=$ELF bin=$BIN)"
@@ -273,9 +274,10 @@ jobs:
               --file="$1" --content-type="application/octet-stream" --remote
             echo "::notice::meshfiles <- $2 ($(stat -c%s "$1") bytes)"
           }
-          put "$BIN" "firmware-$PIO_ENV.bin"
-          if [ -n "$UF2" ]; then
-            put "$UF2" "firmware-$PIO_ENV.uf2"
-          else
-            echo "::warning::no .uf2 for $PIO_ENV — that button keeps serving the previous file"
+          if [ -z "$UF2" ]; then
+            echo "::error::no .uf2 built for $PIO_ENV — the USB flashing download cannot be updated"
+            echo "::error::the catalog upload above already succeeded; only this download is stale"
+            exit 1
           fi
+          put "$BIN" "firmware-$PIO_ENV.bin"
+          put "$UF2" "firmware-$PIO_ENV.uf2"
