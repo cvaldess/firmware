@@ -41,6 +41,9 @@ jobs:
       - name: Mask secrets in logs
         run: |
           echo "::add-mask::${{ secrets.FLASHMESH_ADMIN_TOKEN }}"
+          if [ -n "${{ secrets.CLOUDFLARE_API_TOKEN }}" ]; then
+            echo "::add-mask::${{ secrets.CLOUDFLARE_API_TOKEN }}"
+          fi
           if [ -n "${{ secrets.OTA_PSK_HEX }}" ]; then
             echo "::add-mask::${{ secrets.OTA_PSK_HEX }}"
           fi
@@ -140,6 +143,10 @@ jobs:
           BUILD_DIR=.pio/build/${{ matrix.pio_env }}
           ELF=$(ls "$BUILD_DIR"/firmware-*.elf 2>/dev/null | head -1)
           BIN=$(ls "$BUILD_DIR"/firmware-*.bin 2>/dev/null | head -1)
+          # The .uf2 is for the USB drag-and-drop download on the product pages.
+          # Deliberately not required: the catalog only needs the .bin, and a
+          # missing .uf2 must never cost a release.
+          UF2=$(ls "$BUILD_DIR"/firmware-*.uf2 2>/dev/null | head -1)
           if [ -z "$ELF" ] || [ -z "$BIN" ]; then
             echo "::error::artifacts missing in $BUILD_DIR (elf=$ELF bin=$BIN)"
             ls -la "$BUILD_DIR" || true
@@ -147,7 +154,8 @@ jobs:
           fi
           echo "elf=$ELF" >> "$GITHUB_OUTPUT"
           echo "bin=$BIN" >> "$GITHUB_OUTPUT"
-          echo "::notice::elf=$(basename "$ELF") bin=$(basename "$BIN")"
+          echo "uf2=$UF2" >> "$GITHUB_OUTPUT"
+          echo "::notice::elf=$(basename "$ELF") bin=$(basename "$BIN") uf2=${UF2:+$(basename "$UF2")}"
 
       - name: Sanity check — OTA flag survived sync
         if: steps.dedup.outputs.skip != 'true'
@@ -236,3 +244,38 @@ jobs:
             exit 1
           fi
           echo "::notice::round-trip OK ($DL_CRC, $(stat -c%s "$DL") bytes)"
+
+      # meshfiles is the download surface behind the firmware buttons on the
+      # product pages. The object names carry no version: uploading replaces the
+      # previous file in place, so the buttons never break, never go stale and
+      # never need editing again. Replacing beats delete-then-upload, which would
+      # leave the download dead for as long as the upload takes.
+      #
+      # Runs last on purpose. The catalog is uploaded and verified by this point,
+      # so a failure here cannot cost a release — and the catalog is what keeps
+      # every published build, so nothing is lost by meshfiles holding only the
+      # latest.
+      - name: Publish downloads to meshfiles
+        if: steps.dedup.outputs.skip != 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PIO_ENV: ${{ matrix.pio_env }}
+          BIN: ${{ steps.artifacts.outputs.bin }}
+          UF2: ${{ steps.artifacts.outputs.uf2 }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::warning::CLOUDFLARE_API_TOKEN not set — skipping meshfiles publish"
+            exit 0
+          fi
+          put() {
+            npx --yes wrangler@4 r2 object put "meshfiles/$2" \
+              --file="$1" --content-type="application/octet-stream" --remote
+            echo "::notice::meshfiles <- $2 ($(stat -c%s "$1") bytes)"
+          }
+          put "$BIN" "firmware-$PIO_ENV.bin"
+          if [ -n "$UF2" ]; then
+            put "$UF2" "firmware-$PIO_ENV.uf2"
+          else
+            echo "::warning::no .uf2 for $PIO_ENV — that button keeps serving the previous file"
+          fi
