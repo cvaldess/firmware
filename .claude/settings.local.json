@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "Bash(pio run:*)",
-      "Bash(\"/c/Users/cvald/.platformio/penv/Scripts/pio.exe\" run -e wiznet_5500_evb_pico2_e22)"
+      "Bash(\"/c/Users/cvald/.platformio/penv/Scripts/pio.exe\" run -e wiznet_5500_evb_pico2_e22)",
+      "Bash(ls \"/c/ncs/v3.2.2\" 2>&1 | head -5 *)",
+      "Read(//c/ncs/v3.2.2/**)",
+      "Read(//c/ncs/toolchains/**)",
+      "Bash(find \"/c/ncs/toolchains/c717907b94\" -maxdepth 4 -iname \"arm-none-eabi-g++*\" 2>/dev/null)",
+      "Read(//c/ncs/toolchains/c717907b94/**)"
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "meshtastic"
+  ]
 }
