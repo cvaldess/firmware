@@ -2,7 +2,7 @@ name: FlashMesh — Publish W5500 Variants
 
 # Manual trigger only. ALWAYS run with --ref generate-catalog, NEVER from develop:
 #   gh workflow run flashmesh_publish.yml -R cvaldess/firmware --ref generate-catalog \
-#     -f version_prefix=2.8.0 -f force_rebuild=false
+#     -f version_prefix=2.8.1 -f force_rebuild=false
 # develop is only the upstream sync point; generate-catalog carries the fork-only eth/OTA
 # commits, so publishing from develop ships public images that are missing them.
 # Order of operations: sync upstream -> develop, merge develop -> generate-catalog, then run this.
@@ -15,7 +15,7 @@ on:
       version_prefix:
         description: 'Upstream version prefix (final version = <prefix>.<sha7>)'
         required: true
-        default: '2.8.0'
+        default: '2.8.1'
         type: string
       force_rebuild:
         description: 'Rebuild + re-upload even if SHA already in catalog'
