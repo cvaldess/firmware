@@ -143,9 +143,16 @@ static void dumpTraceroutePayload(const meshtastic_MeshPacket &p, const meshtast
     for (size_t i = 0; i < n; i++)
         snprintf(hex + 2 * i, 3, "%02x", p.decoded.payload.bytes[i]);
     hex[2 * n] = '\0';
-    LOG_INFO("TRDUMP from=0x%08x to=0x%08x id=0x%08x len=%u rc=%u snrt=%u rbc=%u snrb=%u hex=%s", (unsigned)p.from,
-             (unsigned)p.to, (unsigned)p.id, (unsigned)p.decoded.payload.size, (unsigned)r->route_count,
-             (unsigned)r->snr_towards_count, (unsigned)r->route_back_count, (unsigned)r->snr_back_count, hex);
+    // request_id/want_response/relay_node live in the meshtastic_Data envelope, not the
+    // RouteDiscovery payload we hex-dump above -- they pick which branch alterReceivedProtobuf()
+    // takes (updateNextHops() only runs when request_id != 0) and inject_frame's raw mode can't
+    // set them, so a synthetic replay of a captured payload alone can't exercise that branch.
+    // Capturing them here closes that gap for the next real occurrence in the wild.
+    LOG_INFO("TRDUMP from=0x%08x to=0x%08x id=0x%08x len=%u rc=%u snrt=%u rbc=%u snrb=%u reqid=0x%08x wantresp=%u "
+             "relay=0x%02x hex=%s",
+             (unsigned)p.from, (unsigned)p.to, (unsigned)p.id, (unsigned)p.decoded.payload.size, (unsigned)r->route_count,
+             (unsigned)r->snr_towards_count, (unsigned)r->route_back_count, (unsigned)r->snr_back_count,
+             (unsigned)p.decoded.request_id, (unsigned)p.decoded.want_response, (unsigned)p.relay_node, hex);
 }
 #endif
 
