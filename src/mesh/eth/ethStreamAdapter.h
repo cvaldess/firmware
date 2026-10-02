@@ -5,6 +5,7 @@
 #if HAS_ETHERNET && defined(HAS_ETHERNET_API)
 
 #include "ethApiHandlers.h"
+#include "ethBoundedClient.h"
 
 #ifdef USE_ARDUINO_ETHERNET
 #include <Ethernet.h>
@@ -28,7 +29,7 @@ class EthernetClientStream : public IStreamReadWrite
     int read(uint8_t *buf, size_t len) override { return c_.read(buf, len); }
 
     bool connected() override { return c_.connected(); }
-    void flush() override { c_.flush(); }
+    void flush() override { ethFlush(c_); }
     IPAddress remoteIP() override { return c_.remoteIP(); }
 
   private:
