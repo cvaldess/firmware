@@ -15,7 +15,7 @@ on:
       version_prefix:
         description: 'Upstream version prefix (final version = <prefix>.<sha7>)'
         required: true
-        default: '2.8.1'
+        default: '2.8.2'
         type: string
       force_rebuild:
         description: 'Rebuild + re-upload even if SHA already in catalog'
