@@ -38,6 +38,19 @@ static constexpr int32_t IDLE_INTERVAL_MS = 500;
 // inside parseRequest would be irrelevant and the OSThread would stay stuck
 // long after a quiet browser closed its end of the TCP socket.
 static constexpr uint32_t RECV_TIMEOUT_MS = 3000;
+// RECV_TIMEOUT_MS is per call, but mbedtls calls netRecv again for every fragment of a record, so a
+// client trickling bytes could keep the handshake or a single mbedtls_ssl_read() going indefinitely,
+// with the watchdog fed below and nothing else on core0 running. serveClient() therefore gives each
+// phase of a connection an absolute deadline that no receive or send wait outlives: the handshake
+// (~0.5 s on RP2350), then the API session (3 s in handleApiClient, plus its last request and reply).
+static constexpr uint32_t HANDSHAKE_BUDGET_MS = 4000;
+static constexpr uint32_t SESSION_BUDGET_MS = 5000;
+static uint32_t connDeadlineMs = 0;
+
+static bool connDeadlinePassed()
+{
+    return (int32_t)(millis() - connDeadlineMs) >= 0;
+}
 
 // Reuse the picoRand callback semantics from ethCert.cpp. Local copy so we
 // don't have to expose it through a header; the cost is two trivial functions.
@@ -94,7 +107,7 @@ static int netSend(void *ctx, const unsigned char *buf, size_t len)
         size_t w = client->write(buf, len);
         if (w > 0)
             return (int)w;
-        if (millis() - t0 > RECV_TIMEOUT_MS)
+        if (millis() - t0 > RECV_TIMEOUT_MS || connDeadlinePassed())
             return MBEDTLS_ERR_SSL_TIMEOUT;
         watchdog_update();
         delay(2);
@@ -115,11 +128,14 @@ static int netRecv(void *ctx, unsigned char *buf, size_t len)
     // earlier handshake/handler time - easily past the watchdog deadline.
     // The main loop()'s watchdog_update() never runs while the OSThread is
     // inside serveClient(), so it has to be done here.
+    // Checked even with input available: bytes that keep arriving must not stretch the phase either
+    if (connDeadlinePassed())
+        return MBEDTLS_ERR_SSL_TIMEOUT;
     uint32_t t0 = millis();
     while (client->available() == 0) {
         if (!client->connected())
             return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
-        if (millis() - t0 > RECV_TIMEOUT_MS)
+        if (millis() - t0 > RECV_TIMEOUT_MS || connDeadlinePassed())
             return MBEDTLS_ERR_SSL_TIMEOUT;
         watchdog_update();
         delay(2);
@@ -311,6 +327,7 @@ class EthTlsApiServerThread : public concurrency::OSThread
         mbedtls_ssl_set_bio(&ssl, &client, netSend, netRecv, nullptr);
 
         uint32_t t0 = millis();
+        connDeadlineMs = t0 + HANDSHAKE_BUDGET_MS;
         int ret;
         do {
             ret = mbedtls_ssl_handshake(&ssl);
@@ -325,6 +342,7 @@ class EthTlsApiServerThread : public concurrency::OSThread
         }
         LOG_INFO("ETH TLS: handshake OK in %u ms, ciphersuite=%s", (unsigned)(millis() - t0), mbedtls_ssl_get_ciphersuite(&ssl));
 
+        connDeadlineMs = millis() + SESSION_BUDGET_MS;
         MbedTlsStream stream(&ssl, &client);
         handleApiClient(stream);
 
