@@ -22,6 +22,9 @@
  * E22 wiring: SPI and control on P3 (SPIM22; DIO1 on GPIOTE20), RXEN on P1 (held high, any GPIO will do):
  *   MOSI P3.00, MISO P3.01, NSS P3.02, SCK P3.03, BUSY P3.04, DIO1 P3.05, NRESET P3.06, RXEN P1.13
  *   DIO2 -> TXEN bridge on the module, DIO3 drives the TCXO (1.8 V).
+ *
+ * SPIM SCK and TWIM SCL must sit on clock pins (datasheet v1.0, 10.1.2): P3.03 and P0.04 are, as are
+ * P0.03, P1.03, P1.04, P1.07 and P1.13 among the free header pins. P1 and P3 run at 8 MHz at most.
  */
 
 #define VARIANT_MCK (128000000ul)
