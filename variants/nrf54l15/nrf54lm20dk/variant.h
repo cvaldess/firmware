@@ -17,9 +17,10 @@
  * is connected. Nordic advises 2.7 V at most for the on-board LEDs (transistor-buffered, fed by the PMIC);
  * they are status only here, so they may go dark at 3.3 V without harm to the node.
  *
- * E22 wiring, all on header P5 (P3, SPIM22 and GPIOTE20). P2.00-P2.05 go to the MX25R64 by default
- * (board-controller switches), so the nRF54L15-DK harness on P2 does not carry over:
- *   MOSI P3.00, MISO P3.01, NSS P3.02, SCK P3.03, BUSY P3.04, DIO1 P3.05, NRESET P3.06, RXEN P3.07
+ * Free header pins on this DK: P0.03, P0.04, P1.03-P1.07, P1.13, P3.00-P3.06. P2.00-P2.05 go to the
+ * MX25R64 by default (board-controller switches), so the nRF54L15-DK harness on P2 does not carry over.
+ * E22 wiring: SPI and control on P3 (SPIM22; DIO1 on GPIOTE20), RXEN on P1 (held high, any GPIO will do):
+ *   MOSI P3.00, MISO P3.01, NSS P3.02, SCK P3.03, BUSY P3.04, DIO1 P3.05, NRESET P3.06, RXEN P1.13
  *   DIO2 -> TXEN bridge on the module, DIO3 drives the TCXO (1.8 V).
  */
 
@@ -87,6 +88,6 @@ static const uint8_t SCK = PIN_SPI_SCK;
 #define SX126X_BUSY 100 // P3.04
 #define SX126X_RESET 102 // P3.06
 // RXEN is held high permanently (LNA always on); TXEN follows DIO2.
-#define SX126X_ANT_SW 103 // P3.07
+#define SX126X_ANT_SW 45 // P1.13
 #define SX126X_DIO2_AS_RF_SWITCH
 #define SX126X_DIO3_TCXO_VOLTAGE 1.8f
