@@ -12,13 +12,14 @@
  * Serial peripherals are port bound: SERIAL00 (UARTE00/SPIM00) -> P2, SERIAL2x -> P1 and P3,
  * SERIAL30 -> P0. Pin interrupts: P0 -> GPIOTE30, P1 and P3 -> GPIOTE20, P2 none.
  *
- * VDD: the DK ships at 1.8 V. The E22's SPI and DIO lines are 3.3 V, so VDD:nRF and VDD:IO must be
- * raised to 3.3 V in the Board Configurator before the module is connected (Nordic advises 2.7 V at
- * most only because of the on-board LEDs).
+ * VDD: the DK ships at 1.8 V; the nPM1300 sets VDD:nRF anywhere from 1.8 to 3.3 V (Board Configurator)
+ * and VDD:IO follows it. The E22's SPI and DIO lines are 3.3 V, so raise VDD to 3.3 V before the module
+ * is connected. Nordic advises 2.7 V at most for the on-board LEDs (transistor-buffered, fed by the PMIC);
+ * they are status only here, so they may go dark at 3.3 V without harm to the node.
  *
- * E22 wiring - PROVISIONAL, kept identical to the nRF54L15-DK so the same harness moves across;
- * to be checked against the DK user guide (header positions, MX25R64 sharing P2.01-P2.05):
- *   SCK P2.01, MOSI P2.02, BUSY P2.03, MISO P2.04, NSS P2.05, RXEN P2.07, NRESET P2.00, DIO1 P0.00
+ * E22 wiring, all on header P5 (P3, SPIM22 and GPIOTE20). P2.00-P2.05 go to the MX25R64 by default
+ * (board-controller switches), so the nRF54L15-DK harness on P2 does not carry over:
+ *   MOSI P3.00, MISO P3.01, NSS P3.02, SCK P3.03, BUSY P3.04, DIO1 P3.05, NRESET P3.06, RXEN P3.07
  *   DIO2 -> TXEN bridge on the module, DIO3 drives the TCXO (1.8 V).
  */
 
@@ -47,24 +48,26 @@ extern "C" {
 #define PIN_BUTTON1 58
 #define BUTTON_NEED_PULLUP
 
-// Serial1: VCOM0 of the on-board J-Link (UARTE20): TX P1.16, RX P1.17
+// Serial1: VCOM serial port 1 of the on-board J-Link (UARTE20): TX P1.16, RX P1.17
 #define PIN_SERIAL1_RX 49
 #define PIN_SERIAL1_TX 48
 #define SERIAL1_UARTE NRF_UARTE20
 #define SERIAL1_IRQN SERIAL20_IRQn
 #define SERIAL1_IRQ_HANDLER SERIAL20_IRQHandler
 
-// SPI (SPIM00) for the E22
+// SPI (SPIM22, header P5) for the E22: SERIAL22 reaches P3; 8 MHz at most (16 MHz core clock)
 #define SPI_INTERFACES_COUNT 1
-#define PIN_SPI_MISO 68
-#define PIN_SPI_MOSI 66
-#define PIN_SPI_SCK 65
-static const uint8_t SS = 69;
+#define SPI_SPIM NRF_SPIM22
+#define PIN_SPI_MISO 97
+#define PIN_SPI_MOSI 96
+#define PIN_SPI_SCK 99
+static const uint8_t SS = 98;
 static const uint8_t MOSI = PIN_SPI_MOSI;
 static const uint8_t MISO = PIN_SPI_MISO;
 static const uint8_t SCK = PIN_SPI_SCK;
 
-// I2C (TWIM30): SDA P0.03, SCL P0.04, external 4.7k pull-ups required
+// I2C (TWIM30, header P1): SDA P0.03, SCL P0.04, external 4.7k pull-ups required.
+// SERIAL30 is also VCOM serial port 0 (P0.06-P0.09), which is therefore not used.
 #define WIRE_INTERFACES_COUNT 1
 #define PIN_WIRE_SDA 3
 #define PIN_WIRE_SCL 4
@@ -79,11 +82,11 @@ static const uint8_t SCK = PIN_SPI_SCK;
 
 // SX1262 / E22-900M30S
 #define USE_SX1262
-#define SX126X_CS 69
-#define SX126X_DIO1 0 // P0.00: P2 has no GPIOTE
-#define SX126X_BUSY 67
-#define SX126X_RESET 64
+#define SX126X_CS 98    // P3.02
+#define SX126X_DIO1 101 // P3.05 (GPIOTE20)
+#define SX126X_BUSY 100 // P3.04
+#define SX126X_RESET 102 // P3.06
 // RXEN is held high permanently (LNA always on); TXEN follows DIO2.
-#define SX126X_ANT_SW 71
+#define SX126X_ANT_SW 103 // P3.07
 #define SX126X_DIO2_AS_RF_SWITCH
 #define SX126X_DIO3_TCXO_VOLTAGE 1.8f
