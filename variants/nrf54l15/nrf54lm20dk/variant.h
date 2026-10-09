@@ -59,6 +59,14 @@ extern "C" {
 #define SERIAL1_IRQN SERIAL20_IRQn
 #define SERIAL1_IRQ_HANDLER SERIAL20_IRQHandler
 
+// Serial2 (UARTE21, serial module): RX P1.06, TX P1.07; only P1/P3 pins can be assigned to it.
+// Leaves P1.03-P1.05 (AIN7-AIN5) free for analog use.
+#define PIN_SERIAL2_RX 38
+#define PIN_SERIAL2_TX 39
+#define SERIAL2_UARTE NRF_UARTE21
+#define SERIAL2_IRQN SERIAL21_IRQn
+#define SERIAL2_IRQ_HANDLER SERIAL21_IRQHandler
+
 // SPI (SPIM22, header P5) for the E22: SERIAL22 reaches P3; 8 MHz at most (16 MHz core clock)
 #define SPI_INTERFACES_COUNT 1
 #define SPI_SPIM NRF_SPIM22
