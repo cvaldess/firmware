@@ -5,7 +5,7 @@
     },
     "core": "nRF5",
     "cpu": "cortex-m33",
-    "extra_flags": "-DARDUINO_NRF54LM20_DK -DNRF54LM20A_XXAA",
+    "extra_flags": "-DARDUINO_NRF54LM20_DK -DNRF54LM20A_XXAA -DDEVELOP_IN_NRF54LM20B",
     "f_cpu": "128000000L",
     "mcu": "nrf54lm20a",
     "mcu_define": "NRF54LM20A_XXAA",
