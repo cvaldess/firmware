@@ -1,7 +1,7 @@
 {
   "build": {
     "arduino": {
-      "ldscript": "nrf54lm20a_s145_v10.ld"
+      "ldscript": "nrf54lm20a_s145_v10_bl64k.ld"
     },
     "core": "nRF5",
     "cpu": "cortex-m33",
@@ -43,8 +43,8 @@
   "name": "Nordic nRF54LM20-DK",
   "upload": {
     "maximum_ram_size": 243584,
-    "maximum_size": 1839104,
-    "offset_address": "0x8000",
+    "maximum_size": 1806336,
+    "offset_address": "0x10000",
     "speed": 115200,
     "protocol": "jlink",
     "protocols": [
@@ -53,7 +53,8 @@
       "pyocd"
     ],
     "require_upload_port": false,
-    "wait_for_upload_port": false,
+    "use_1200bps_touch": true,
+    "wait_for_upload_port": true,
     "rramc_base": "0x5004E000",
     "pyocd_target": "nrf54lm20a"
   },
