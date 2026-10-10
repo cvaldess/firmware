@@ -7,6 +7,16 @@
     "cpu": "cortex-m33",
     "extra_flags": "-DARDUINO_NRF54LM20_DK -DNRF54LM20A_XXAA -DDEVELOP_IN_NRF54LM20B -DUSE_TINYUSB",
     "f_cpu": "128000000L",
+    "hwids": [
+      [
+        "0x239A",
+        "0xCAFE"
+      ],
+      [
+        "0x239A",
+        "0x4AFE"
+      ]
+    ],
     "mcu": "nrf54lm20a",
     "mcu_define": "NRF54LM20A_XXAA",
     "variant": "nrf54lm20dk",
