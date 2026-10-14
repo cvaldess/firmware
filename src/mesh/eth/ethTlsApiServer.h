@@ -17,4 +17,9 @@ void initEthTlsApiServer();
 /// rebinds on its next tick. Called by reconnectETH() after a W5500 chip reset.
 void deInitEthTlsApiServer();
 
+/// Move the current connection's deadline a full session budget past now. For a handler that streams a
+/// long body after authenticating (the OTA upload), called as the data keeps arriving: the deadline is
+/// there so a client trickling bytes cannot hold core0, and an upload that stalls still runs into it.
+void ethTlsApiRenewDeadline();
+
 #endif // HAS_ETHERNET && HAS_ETHERNET_TLS_API && ARCH_RP2040
