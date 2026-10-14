@@ -47,6 +47,9 @@ jobs:
           if [ -n "${{ secrets.OTA_PSK_HEX }}" ]; then
             echo "::add-mask::${{ secrets.OTA_PSK_HEX }}"
           fi
+          if [ -n "${{ secrets.CLOUDFLARE_PURGE_TOKEN }}" ]; then
+            echo "::add-mask::${{ secrets.CLOUDFLARE_PURGE_TOKEN }}"
+          fi
 
       - name: Checkout
         uses: actions/checkout@v5
@@ -290,3 +293,58 @@ jobs:
           }
           put "$BIN" "firmware-$PIO_ENV.bin"
           put "$UF2" "firmware-$PIO_ENV.uf2"
+
+      # Replacing the object in R2 does not reach Cloudflare's edge cache: after
+      # the 2026-10-14 publish, three of the four downloads still served the
+      # build from five days before (cf-cache-status HIT). Purge the two URLs
+      # this job just replaced, then fetch them back through the cache, the way
+      # a visitor would, and compare them with what was uploaded.
+      - name: Purge meshfiles downloads from the Cloudflare cache
+        if: steps.dedup.outputs.skip != 'true'
+        env:
+          # API token with only Zone > Cache Purge > Purge, on cvaldess.com.
+          CF_PURGE_TOKEN: ${{ secrets.CLOUDFLARE_PURGE_TOKEN }}
+          ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          MESHFILES_URL: https://meshfiles.cvaldess.com
+          PIO_ENV: ${{ matrix.pio_env }}
+          BIN: ${{ steps.artifacts.outputs.bin }}
+          UF2: ${{ steps.artifacts.outputs.uf2 }}
+        run: |
+          if [ -z "$CF_PURGE_TOKEN" ] || [ -z "$ZONE_ID" ]; then
+            echo "::warning::CLOUDFLARE_PURGE_TOKEN or CLOUDFLARE_ZONE_ID not set — the meshfiles downloads may serve the previous build until the edge cache expires"
+            exit 0
+          fi
+          URL_BIN="$MESHFILES_URL/firmware-$PIO_ENV.bin"
+          URL_UF2="$MESHFILES_URL/firmware-$PIO_ENV.uf2"
+          RESP=$(mktemp)
+          HTTP=$(curl -sS -o "$RESP" -w '%{http_code}' \
+            -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/purge_cache" \
+            -H "Authorization: Bearer $CF_PURGE_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "$(jq -cn --arg a "$URL_BIN" --arg b "$URL_UF2" '{files: [$a, $b]}')")
+          if [ "$HTTP" -ne 200 ] || [ "$(jq -r '.success' < "$RESP" 2>/dev/null)" != "true" ]; then
+            echo "::error::cache purge failed, HTTP $HTTP: $(jq -c '.errors' < "$RESP" 2>/dev/null || cat "$RESP")"
+            echo "::error::the catalog and meshfiles uploads above succeeded; only the cached downloads may be stale"
+            exit 1
+          fi
+          echo "::notice::purged $URL_BIN and $URL_UF2"
+          # A purge takes a few seconds to reach every edge, so retry before
+          # calling a download stale.
+          check() {
+            local url=$1 want got=""
+            want=$(sha256sum < "$2" | cut -d' ' -f1)
+            for _ in 1 2 3 4 5 6; do
+              got=$(curl -fsS "$url" | sha256sum | cut -d' ' -f1)
+              if [ "$got" = "$want" ]; then
+                echo "::notice::$url serves the uploaded file ($want)"
+                return 0
+              fi
+              sleep 5
+            done
+            echo "::error::$url serves $got, not the uploaded $want"
+            return 1
+          }
+          rc=0
+          check "$URL_BIN" "$BIN" || rc=1
+          check "$URL_UF2" "$UF2" || rc=1
+          exit $rc
