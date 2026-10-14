@@ -52,6 +52,11 @@ static bool connDeadlinePassed()
     return (int32_t)(millis() - connDeadlineMs) >= 0;
 }
 
+void ethTlsApiRenewDeadline()
+{
+    connDeadlineMs = millis() + SESSION_BUDGET_MS;
+}
+
 // Reuse the picoRand callback semantics from ethCert.cpp. Local copy so we
 // don't have to expose it through a header; the cost is two trivial functions.
 static int picoRand(void * /*ctx*/, unsigned char *out, size_t len)

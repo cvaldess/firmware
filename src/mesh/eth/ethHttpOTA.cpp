@@ -25,6 +25,15 @@
 #define FEED_WATCHDOG() ((void)0)
 #endif
 
+// Over HTTPS the upload runs inside a TLS connection whose deadline (SESSION_BUDGET_MS, 5 s) is shorter
+// than the ~10 s a 544 KB image takes; the upload keeps pushing it forward while data arrives.
+#if defined(HAS_ETHERNET_TLS_API) && defined(ARCH_RP2040)
+#include "ethTlsApiServer.h"
+#define RENEW_TLS_DEADLINE() ethTlsApiRenewDeadline()
+#else
+#define RENEW_TLS_DEADLINE() ((void)0)
+#endif
+
 static constexpr uint32_t NONCE_TTL_MS = 30000;
 static constexpr uint32_t BODY_TIMEOUT_MS = 30000;
 static constexpr size_t CHUNK_SIZE = 1024;
@@ -258,6 +267,7 @@ void handleOtaUpload(IStreamReadWrite &client, const Request &req)
     }
 
     LOG_INFO("ETH HTTP OTA: Receiving %u bytes, CRC=0x%08X", (unsigned)declaredSize, (unsigned)declaredCrc);
+    RENEW_TLS_DEADLINE();
 
     uint8_t buf[CHUNK_SIZE];
     size_t remaining = declaredSize;
@@ -272,7 +282,19 @@ void handleOtaUpload(IStreamReadWrite &client, const Request &req)
             return;
         }
         int avail = client.available();
-        if (avail <= 0) {
+        int got = 0;
+        if (avail > 0) {
+            size_t cap = sizeof(buf);
+            if (remaining < cap)
+                cap = remaining;
+            if ((size_t)avail < cap)
+                cap = (size_t)avail;
+            got = client.read(buf, cap);
+        }
+        // A failed read waits like an idle socket. Over TLS available() counts the raw bytes still in the
+        // socket, so a read that keeps failing at once (its connection deadline passed) used to loop here
+        // without feeding the watchdog until it reset the node halfway through the upload.
+        if (got <= 0) {
             if (millis() - lastActivity > BODY_TIMEOUT_MS) {
                 LOG_WARN("ETH HTTP OTA: Timeout (%u/%u)", (unsigned)totalReceived, (unsigned)declaredSize);
                 Update.end(false);
@@ -283,14 +305,6 @@ void handleOtaUpload(IStreamReadWrite &client, const Request &req)
             delay(1);
             continue;
         }
-        size_t cap = sizeof(buf);
-        if (remaining < cap)
-            cap = remaining;
-        if ((size_t)avail < cap)
-            cap = (size_t)avail;
-        int got = client.read(buf, cap);
-        if (got <= 0)
-            continue;
 
         if (Update.write(buf, (size_t)got) != (size_t)got) {
             LOG_ERROR("ETH HTTP OTA: Update.write failed, error=%u", Update.getError());
@@ -304,6 +318,7 @@ void handleOtaUpload(IStreamReadWrite &client, const Request &req)
         totalReceived += (size_t)got;
         lastActivity = millis();
         FEED_WATCHDOG();
+        RENEW_TLS_DEADLINE();
 
         if (totalReceived % (declaredSize / 10 + 1) < (size_t)got) {
             LOG_INFO("ETH HTTP OTA: %u%% (%u/%u)", (unsigned)(100ULL * totalReceived / declaredSize),
@@ -327,6 +342,7 @@ void handleOtaUpload(IStreamReadWrite &client, const Request &req)
     }
 
     LOG_INFO("ETH HTTP OTA: Update staged (%u bytes). Rebooting...", (unsigned)declaredSize);
+    RENEW_TLS_DEADLINE(); // finalising can take a while; the reply must still get out
 
     const char *body = "{\"ok\":true}";
     int bodyLen = (int)strlen(body);
