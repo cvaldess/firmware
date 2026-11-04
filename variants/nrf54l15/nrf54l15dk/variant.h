@@ -15,7 +15,11 @@
  *
  * DIO1 cannot live on P2: the fast port has no GPIOTE instance (only P0 -> GPIOTE30 and P1 -> GPIOTE20
  * can raise pin interrupts), so a P2 DIO1 leaves the radio on the driver's polling fallback and drops
- * back-to-back packets. P0 is a 3.0 V domain like P2; P1 is 1.8 V and must not see the 3.3 V DIO1.
+ * back-to-back packets. P0.00 is used here; a free P1 pin would work as well.
+ *
+ * The E22's logic is 3.3 V and every nRF54L15 port runs at the DK's VDD, which is 1.8 V out of the box:
+ * set VDD to 3.3 V in the nRF Connect Board Configurator before wiring the module. P0.00-P0.03 are also
+ * wired to the interface MCU's UART by default; disable that VCOM there too, so it does not drive P0.00.
  */
 
 #define VARIANT_MCK (128000000ul)
