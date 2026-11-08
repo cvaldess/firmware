@@ -60,6 +60,7 @@ CMakeLists.txt
 # PYTHONPATH used by the Nix shell
 .python3
 .claude/scheduled_tasks.lock
+.claude/settings.local.json
 userPrefs.jsonc.mcp-session-bak
 
 # Fake-NodeDB fixture pipeline (bin/regen-fake-nodedbs.sh)
